@@ -15,6 +15,7 @@
 /* USER CODE END Header */
 
 #include "app_chassis.h"
+#include "board_cfg.hpp"
 
 // 数学、力控分配、PID、CAN、电机、系统状态和遥控器接口。
 #include "alg_basic.hpp"
@@ -321,6 +322,7 @@ bool EstimateBodyVelocity(
  *       任一电机配置或注册失败时进入 Error_Handler()。
  */
 void Chassis_Init(void) {
+    if (!board_cfg::kConfig.has_chassis) { return; }
     ForceActuatorParam params[kWheelCount] = {};
 
     // 1. 配置并注册四个 M3508；减速比和方向在此阶段一次性确定。
@@ -423,6 +425,7 @@ void Chassis_Init(void) {
  *       -> 遥控速度闭环 -> 力控分配 -> CAN 电流命令。
  */
 void Chassis_Control(void) {
+    if (!board_cfg::kConfig.has_chassis) { return; }
     float wheelOmega[kWheelCount];
 
     // 1. 读取新电机驱动换算后的轮输出轴角速度。

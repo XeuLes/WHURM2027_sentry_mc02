@@ -11,6 +11,7 @@
 
 
 #include "lf_core.hpp"
+#include "main.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -27,6 +28,8 @@ void SystemStateStore::updateImu(const ImuState &state)
 {
     taskENTER_CRITICAL();
     g_system_state.imu = state;
+    g_system_state.imu.updated_at_ms = HAL_GetTick();
+    g_system_state.imu.valid = true;
     taskEXIT_CRITICAL();
 }
 
@@ -42,6 +45,7 @@ void SystemStateStore::updateGimbal(const GimbalState &state)
 {
     taskENTER_CRITICAL();
     g_system_state.gimbal = state;
+    g_system_state.gimbal.updated_at_ms = HAL_GetTick();
     taskEXIT_CRITICAL();
 }
 
@@ -63,6 +67,8 @@ void SystemStateStore::updateRobotCmd(const RobotCmdState &state)
 {
     taskENTER_CRITICAL();
     g_system_state.robot_cmd = state;
+    g_system_state.robot_cmd.updated_at_ms = HAL_GetTick();
+    g_system_state.robot_cmd.valid = true;
     taskEXIT_CRITICAL();
 }
 

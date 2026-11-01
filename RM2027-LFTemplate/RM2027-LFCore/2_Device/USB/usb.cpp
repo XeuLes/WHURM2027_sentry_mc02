@@ -30,6 +30,8 @@
 #include "referee.hpp"
 #include "lf_core.hpp"
 
+#include "gimbal_config.h"
+
 #define USB_LINK_TIMEOUT_MS 100  // ms
 #define USB_CONNECT_CNT 10
 
@@ -77,7 +79,6 @@ void Usb::Update(void)
 {
     SendAll();
     Receive();
-    UpdateRobotCmd();
     UpdateVirtualRc();
     UpdateSentryCmd();
 
@@ -338,7 +339,19 @@ void Usb::Receive(void)
             if (crc16_ok) {
                 switch (data_id) {
                     case ROBOT_CMD_DATA_RECEIVE_ID: {
-                        memcpy(&receive_robot_cmd, sof_address, sizeof(ReceiveDataRobotCmd_s));
+                        if ((4U + data_len + 2U) == sizeof(ReceiveDataRobotCmd_s)) {
+                            uint32_t command_timestamp;
+                            memcpy(&command_timestamp, &sof_address[4], sizeof(command_timestamp));
+                            // The receive buffer can be parsed again on subsequent polls.
+                            // Host timestamps must advance; equal target VALUES are allowed.
+                            if (!has_robot_cmd_timestamp ||
+                                static_cast<int32_t>(command_timestamp - latest_robot_cmd_timestamp) > 0) {
+                                latest_robot_cmd_timestamp = command_timestamp;
+                                has_robot_cmd_timestamp = true;
+                                memcpy(&receive_robot_cmd, sof_address, sizeof(ReceiveDataRobotCmd_s));
+                                UpdateRobotCmd();
+                            }
+                        }
                     } break;
                     case PID_DEBUG_DATA_RECEIVE_ID: {
                         memcpy(&receive_pid_debug, sof_address, sizeof(ReceiveDataPidDebug_s));
@@ -597,13 +610,17 @@ void Usb::SendRobotStatus(void)
  */
 void Usb::SendJointState(void)
 {
-    /* TODO: 等云台模块写好、CmdGimbalJointState() 有定义后启用。
-       本包与裁判系统无关，暂时发 0 会让上位机把云台画在零位，所以整包先不发。 */
-    // send_joint_state.time_stamp = HAL_GetTick();
-    // send_joint_state.data.pitch = CmdGimbalJointState(AX_PITCH);
-    // send_joint_state.data.yaw = 0.0f;
-    // append_CRC16_check_sum((uint8_t *)&send_joint_state, sizeof(SendDataJointState_s));
-    // USB_Transmit((uint8_t *)&send_joint_state, sizeof(SendDataJointState_s));
+#if GIMBAL_CONTROL_ENABLED && GIMBAL_SMALL_ENABLE
+    const auto state = LuojiaFox::system_state.read().gimbal;
+    const uint32_t now = HAL_GetTick();
+    if (!state.online ||
+        now - state.updated_at_ms >= 20U) { return; }
+    send_joint_state.time_stamp = now;
+    send_joint_state.data.pitch = state.joint_pitch_rad;
+    send_joint_state.data.yaw = state.joint_yaw_rad;
+    append_CRC16_check_sum((uint8_t *)&send_joint_state, sizeof(SendDataJointState_s));
+    USB_Transmit((uint8_t *)&send_joint_state, sizeof(SendDataJointState_s));
+#endif
 }
 
 /**

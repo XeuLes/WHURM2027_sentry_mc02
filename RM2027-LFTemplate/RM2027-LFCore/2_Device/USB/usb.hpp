@@ -151,6 +151,8 @@ private:
     bool offline = true;
     uint32_t receive_time = 0;
     uint32_t latest_rx_timestamp = 0;
+    uint32_t latest_robot_cmd_timestamp = 0;
+    bool has_robot_cmd_timestamp = false;
     uint32_t continue_receive_cnt = 0;
 
     /* 数据发送结构体 */

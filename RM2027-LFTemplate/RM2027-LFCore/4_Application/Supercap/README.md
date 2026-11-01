@@ -18,8 +18,8 @@
 
 CAN 发送复用 `bspFdcanSend()`，反馈复用 `bspFdcanAddObserver()`，与电机共享本工程的
 FDCAN 中断分发。没有复制外部 `can_service` 或另写 HAL 接收回调。
-裁判数据直接取自 `referee.GetPowerSupplySnapshot()`，无需移植外部 `chassis_move`、
-`robot_state` 或重复建立裁判解析模块。
+裁判系统在底盘板接收；超电直接使用本板 `referee.GetPowerSupplySnapshot()`
+获取功率、缓冲能量及其新鲜度。
 
 ## 与提供任务的对应
 

@@ -34,6 +34,8 @@ struct ImuState
     float yaw_rate_dps;
     float pitch_rate_dps;
     float roll_rate_dps;
+    uint32_t updated_at_ms = 0U;
+    bool valid = false;
 };
 
 struct ChassisState
@@ -48,6 +50,11 @@ struct GimbalState
     float yaw_deg;
     float pitch_deg;
     bool online;
+    float joint_yaw_rad = 0.0f;
+    float joint_pitch_rad = 0.0f;
+    uint8_t mode = 0U;
+    bool ready = false;
+    uint32_t updated_at_ms = 0U;
 };
 
 struct ShooterState
@@ -77,6 +84,8 @@ struct RobotCmdState
     float gimbal_yaw;
     uint8_t fire;
     uint8_t fric_on;
+    uint32_t updated_at_ms = 0U;
+    bool valid = false;
 };
 
 struct UsbLinkState

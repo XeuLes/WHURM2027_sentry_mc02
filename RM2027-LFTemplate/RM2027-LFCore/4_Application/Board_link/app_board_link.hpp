@@ -54,6 +54,13 @@ struct __attribute__((packed)) ChassisToGimbalPayload {
     uint16_t robot_id;
     uint16_t remaining_hp;
     uint8_t referee_online;
+    uint16_t power_limit_w;
+    uint16_t buffer_energy_j;
+    uint32_t power_age_ms;
+    uint32_t buffer_age_ms;
+    uint8_t power_received;
+    uint8_t buffer_received;
+
 };
 
 /**
@@ -71,6 +78,10 @@ struct __attribute__((packed)) GimbalToChassisPayload {
     float wz;
 
     uint8_t usb_online;
+    float small_yaw_offset_rad;
+    // Distinguishes continuous SCAN from threshold-following AUTO_AIM.
+    uint8_t gimbal_mode;
+
 };
 
 static_assert(
@@ -133,6 +144,7 @@ bool getRemoteGimbalData(GimbalToChassisPayload* output);
  * @return true 表示对端在线。
  */
 bool isPeerOnline(uint32_t now_ms);
+
 
 /**
  * @brief 获取板间通信统计快照。

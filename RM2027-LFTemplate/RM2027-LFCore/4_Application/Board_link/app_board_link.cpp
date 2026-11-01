@@ -10,12 +10,14 @@
 #include "dvc_communication.hpp"
 #include "lf_core.hpp"
 #include "remote_control.h"
+#include "referee.hpp"
 #include "usb.hpp"
 
 #include "FreeRTOS.h"
 #include "task.h"
 
 #include <string.h>
+#include <math.h>
 
 namespace board_link {
 //新增调试对象
@@ -87,6 +89,8 @@ bool validateHeader(
 void sendChassisData(uint32_t now_ms) {
     const LuojiaFox::SystemStateSnapshot state =
         LuojiaFox::system_state.read();
+    const RefereePowerSnapshot power = referee.GetPowerSupplySnapshot();
+    const bool rc_online = !getRcOffline();
     const RcControl* rc = getRemoteControlPoint();
 
     ChassisToGimbalPayload payload = {};
@@ -94,9 +98,8 @@ void sendChassisData(uint32_t now_ms) {
     payload.sender_board_id = board_cfg::kConfig.self_board_id;
     payload.receiver_board_id = board_cfg::kConfig.peer_board_id;
     payload.sequence = g_tx_sequence++;
-    payload.rc_online = getRcOffline() ? 0U : 1U;
-
-    if (rc != nullptr) {
+    payload.rc_online = rc_online ? 1U : 0U;
+    if (rc_online && rc != nullptr) {
         taskENTER_CRITICAL();
         memcpy(payload.rc_ch, rc->rc.ch, sizeof(payload.rc_ch));
         memcpy(payload.rc_switch, rc->rc.s, sizeof(payload.rc_switch));
@@ -107,8 +110,10 @@ void sendChassisData(uint32_t now_ms) {
         payload.mouse_left = rc->mouse.press_l;
         payload.mouse_right = rc->mouse.press_r;
         taskEXIT_CRITICAL();
+    } else {
+        payload.rc_switch[0] = RC_SW_DOWN;
+        payload.rc_switch[1] = RC_SW_DOWN;
     }
-
     payload.vx = state.chassis.vx;
     payload.vy = state.chassis.vy;
     payload.wz = state.chassis.wz;
@@ -119,10 +124,16 @@ void sendChassisData(uint32_t now_ms) {
     payload.imu_yaw_rate_dps = state.imu.yaw_rate_dps;
     payload.imu_pitch_rate_dps = state.imu.pitch_rate_dps;
     payload.imu_roll_rate_dps = state.imu.roll_rate_dps;
-
     payload.robot_id = state.referee.robot_id;
     payload.remaining_hp = state.referee.remaining_hp;
-    payload.referee_online = state.referee.connected ? 1U : 0U;
+    payload.referee_online = power.online ? 1U : 0U;
+    payload.power_limit_w = power.power_limit_w;
+    payload.buffer_energy_j = power.buffer_energy_j;
+    payload.power_age_ms = power.power_received ? now_ms - power.power_tick : 0U;
+    payload.buffer_age_ms = power.buffer_received ? now_ms - power.buffer_tick : 0U;
+    payload.power_received = power.power_received ? 1U : 0U;
+    payload.buffer_received = power.buffer_received ? 1U : 0U;
+
 
     taskENTER_CRITICAL();
     g_tx_debug.last_chassis_payload = payload;
@@ -160,6 +171,9 @@ void sendGimbalData(uint32_t now_ms) {
     }
 
     payload.usb_online = usb_online ? 1U : 0U;
+    payload.small_yaw_offset_rad = state.gimbal.joint_yaw_rad;
+    payload.gimbal_mode = state.gimbal.mode;
+
 
     taskENTER_CRITICAL();
     g_tx_debug.last_gimbal_payload = payload;
@@ -183,17 +197,29 @@ void publishChassisRemoteState(
     const ChassisToGimbalPayload& payload,
     uint32_t now_ms
 ) {
+    // The peer IMU is mounted on big yaw. Never overwrite the local small-
+    // gimbal IMU with it. IMU/power details remain in getRemoteChassisData().
     LuojiaFox::system_state.updateChassis({
         payload.vx,
         payload.vy,
         payload.wz
     });
-
     LuojiaFox::system_state.updateReferee({
         payload.robot_id,
         payload.remaining_hp,
         payload.referee_online != 0U
     });
+
+    RcControl remote_rc{};
+    memcpy(remote_rc.rc.ch, payload.rc_ch, sizeof(payload.rc_ch));
+    memcpy(remote_rc.rc.s, payload.rc_switch, sizeof(payload.rc_switch));
+    remote_rc.mouse.x = payload.mouse_x;
+    remote_rc.mouse.y = payload.mouse_y;
+    remote_rc.mouse.z = payload.mouse_z;
+    remote_rc.key.v = payload.keyboard;
+    remote_rc.mouse.press_l = payload.mouse_left;
+    remote_rc.mouse.press_r = payload.mouse_right;
+    remoteControlPublishBoardLink(&remote_rc, payload.rc_online != 0U, now_ms);
 
     taskENTER_CRITICAL();
     const bool has_previous = g_shared_state.has_chassis_data;
@@ -216,6 +242,16 @@ void publishGimbalRemoteState(
     const GimbalToChassisPayload& payload,
     uint32_t now_ms
 ) {
+    LuojiaFox::GimbalState gimbal{};
+    // Only the small-yaw offset and mode are available on the chassis.
+    const bool values_ok = isfinite(payload.small_yaw_offset_rad);
+    if (values_ok) {
+        gimbal.joint_yaw_rad = payload.small_yaw_offset_rad;
+    }
+    gimbal.mode = payload.gimbal_mode;
+    gimbal.online = values_ok;
+    LuojiaFox::system_state.updateGimbal(gimbal);
+
     LuojiaFox::system_state.updateRobotCmd({
         payload.vx,
         payload.vy,
@@ -251,6 +287,13 @@ void processIncomingFrame(
     const communication_protocol::Frame& frame,
     uint32_t now_ms
 ) {
+    const auto expected_id = board_cfg::kIsChassisBoard ?
+        communication_protocol::MessageId::kGimbalToChassis :
+        communication_protocol::MessageId::kChassisToGimbal;
+    if (frame.message_id != static_cast<uint8_t>(expected_id)) {
+        recordInvalidRxFrame();
+        return;
+    }
     if (board_cfg::kIsChassisBoard) {
         if (!validateHeader(
                 frame.payload,

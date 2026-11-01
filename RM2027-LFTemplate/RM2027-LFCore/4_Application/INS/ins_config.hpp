@@ -84,7 +84,7 @@
 /**
  * @brief the index of pitch angle update
  */
-#define IMU_ANGLE_INDEX_PITCH 2U
+#define IMU_ANGLE_INDEX_PITCH 1U
 /**
  * @brief the index of yaw angle update
  */
@@ -92,7 +92,7 @@
 /**
  * @brief the index of roll angle update
  */
-#define IMU_ANGLE_INDEX_ROLL 1U
+#define IMU_ANGLE_INDEX_ROLL 2U
 
 /**
  * @brief the index of pitch gyro update

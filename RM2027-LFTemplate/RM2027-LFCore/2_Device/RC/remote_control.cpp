@@ -32,6 +32,7 @@
   */
 
 #include "remote_control.h"
+#include "Board_cfg/board_cfg.hpp"
 
 #include "alg_basic.hpp"
 #include "drv_uart.h"
@@ -85,6 +86,9 @@ alignas(32) static uint8_t sbus_rx_buf[2][SBUS_DMA_BUFFER_SIZE];
 static volatile uint32_t last_receive_time = 0;
 // 记录连续接收数据的次数
 static volatile uint32_t receive_count = 0;
+static volatile bool board_link_rc_online = false;
+static volatile uint32_t board_link_rc_tick = 0;
+static volatile bool board_link_rc_received = false;
 // 记录非dt7的sbus遥控器连续断连次数
 static volatile uint32_t sbus_lost_count = SBUS_MAX_LOST_NUN + 5;
 
@@ -115,6 +119,20 @@ void remoteControlInit(void) {
 #elif (RC_TYPE == RC_ET08A)
     connected_flag = ET08A_RC_CONNECTED_FLAG;
 #endif
+}
+void remoteControlPublishBoardLink(const RcControl* state, bool online, uint32_t now_ms) {
+    if (board_cfg::kConfig.rc_source != board_cfg::RcSource::kBoardLink || state == nullptr) {
+        return;
+    }
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    __DMB();
+    rc_state = *state;
+    board_link_rc_online = online;
+    board_link_rc_tick = now_ms;
+    board_link_rc_received = true;
+    __DMB();
+    __set_PRIMASK(mask);
 }
 /**
   * @brief          get remote control data point
@@ -262,6 +280,10 @@ extern "C" void UART5_IRQHandler() {
   * @retval         true:离线，false:在线
   */
 bool getRcOffline(void) {
+    if (board_cfg::kConfig.rc_source == board_cfg::RcSource::kBoardLink) {
+        return !board_link_rc_received || !board_link_rc_online ||
+               (HAL_GetTick() - board_link_rc_tick >= RC_LOST_TIME);
+    }
 #if RC_TYPE == RC_DT7
     #define USE_SBUS_LOST_COUNT 0
 #else
