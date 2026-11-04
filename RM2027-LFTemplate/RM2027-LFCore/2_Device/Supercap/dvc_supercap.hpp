@@ -4,7 +4,6 @@
 
 struct SupercapConfig {
     FDCAN_HandleTypeDef* bus = nullptr;
-    uint32_t rx_identifier = 0x800U; // 新版反馈 ID 必须由实际设备协议指定。
     uint32_t offline_timeout_ms = 100U;
     float max_referee_power_w = 65535.0f;
     float max_buffer_j = 65535.0f;
@@ -37,6 +36,7 @@ public:
     Supercap& operator=(const Supercap&) = delete;
     /** @brief 初始化并接入 CAN 观察者，对象须为 static，注册后不允许重新 init。 */
     bool init(const SupercapConfig& config);
+    // Only the confirmed 0x52 standard classic CAN feedback is accepted.
     bool update(uint32_t identifier, const uint8_t* data, uint8_t length);
     /** @brief 返回反馈副本，包含接收计数、最近接收时间和当前在线状态。 */
     SupercapFeedback data() const;

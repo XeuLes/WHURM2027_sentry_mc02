@@ -12,7 +12,7 @@
 namespace board_link {
 
 /** Payload 协议版本，两端必须保持一致。 */
-constexpr uint8_t kProtocolVersion = 2U;
+constexpr uint8_t kProtocolVersion = 3U;
 
 /** 周期发送本板状态的间隔，单位毫秒。 */
 constexpr uint32_t kTxPeriodMs = 10U;
@@ -60,6 +60,8 @@ struct __attribute__((packed)) ChassisToGimbalPayload {
     uint32_t buffer_age_ms;
     uint8_t power_received;
     uint8_t buffer_received;
+    // Echo of the requested passage mode once big yaw is holding its heading.
+    uint8_t big_yaw_hold_mode;
 
 };
 

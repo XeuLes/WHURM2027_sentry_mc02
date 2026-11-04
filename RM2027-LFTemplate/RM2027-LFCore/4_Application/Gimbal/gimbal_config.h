@@ -80,3 +80,30 @@
 #define GIMBAL_AUTO_AIM_ENABLE 0
 #endif
 #define GIMBAL_AIM_ANGLE_TO_RAD 1.0f
+
+/* Roll hardware/SMC placeholders. Confirm the type, wiring and mechanical
+ * limits before running on hardware; this adapter currently supports DJI. */
+#define GIMBAL_ROLL_TYPE MotorType::DjiGm6020
+#define GIMBAL_ROLL_CAN (&hfdcan2)
+#define GIMBAL_ROLL_ID 4U
+#define GIMBAL_ROLL_DIRECTION 1
+#define GIMBAL_ROLL_RATIO 1.0f
+#define GIMBAL_ROLL_MID_ECD 0U
+#define GIMBAL_ROLL_SMC_PARAMS {20.0f,750.0f,6.0f,0,0,0,0,0,0.001f}
+#define GIMBAL_ROLL_OUTPUT_MAX 10000.0f
+#define GIMBAL_ROLL_MIN_RAD (-1.7f)
+#define GIMBAL_ROLL_MAX_RAD 1.7f
+#define GIMBAL_ROLL_UPRIGHT_RAD 0.0f
+#define GIMBAL_PASS_ROLL_RAD 1.5707963268f
+#define GIMBAL_PASS_PITCH_RAD 0.0f
+/* Input can be reassigned without changing the state machine. */
+#define GIMBAL_PASS_SWITCH_INDEX RC_SW_LEFT
+#define GIMBAL_PASS_SWITCH_POSITION RC_SW_DOWN
+#define GIMBAL_PASS_JOINT_SPEED_RAD_S 0.5f
+#define GIMBAL_PASS_JOINT_ACCEL_RAD_S2 1.0f
+#define GIMBAL_ROLL_SPEED_RAD_S 0.5f
+#define GIMBAL_ROLL_ACCEL_RAD_S2 1.0f
+#define GIMBAL_PASS_POSITION_TOL_RAD 0.03f
+#define GIMBAL_PASS_SPEED_TOL_RAD_S 0.05f
+#define GIMBAL_PASS_SETTLE_MS 200U
+#define GIMBAL_PASS_PHASE_TIMEOUT_MS 10000U

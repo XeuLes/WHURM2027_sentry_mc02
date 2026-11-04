@@ -16,6 +16,18 @@ static_assert(GIMBAL_FOLLOW_EXIT_RAD < GIMBAL_FOLLOW_ENTER_RAD &&
     "follow hysteresis must lie inside small yaw limits");
 static_assert(GIMBAL_PITCH_MIN_RAD < 0 && GIMBAL_PITCH_MAX_RAD > 0,
     "pitch zero must lie inside measured limits");
+static_assert(GIMBAL_PASS_ROLL_RAD >= GIMBAL_ROLL_MIN_RAD &&
+    GIMBAL_PASS_ROLL_RAD <= GIMBAL_ROLL_MAX_RAD &&
+    GIMBAL_ROLL_UPRIGHT_RAD >= GIMBAL_ROLL_MIN_RAD &&
+    GIMBAL_ROLL_UPRIGHT_RAD <= GIMBAL_ROLL_MAX_RAD,
+    "roll poses must lie inside measured limits");
+static_assert(GIMBAL_PASS_PITCH_RAD >= GIMBAL_PITCH_MIN_RAD &&
+    GIMBAL_PASS_PITCH_RAD <= GIMBAL_PITCH_MAX_RAD,
+    "passage pitch must lie inside measured limits");
+static_assert(GIMBAL_ROLL_SPEED_RAD_S > 0 && GIMBAL_ROLL_ACCEL_RAD_S2 > 0 &&
+    GIMBAL_PASS_JOINT_SPEED_RAD_S > 0 && GIMBAL_PASS_JOINT_ACCEL_RAD_S2 > 0 &&
+    GIMBAL_PASS_SETTLE_MS > 0 && GIMBAL_PASS_PHASE_TIMEOUT_MS > GIMBAL_PASS_SETTLE_MS,
+    "passage motion parameters must be positive");
 
 float clamp(float x, float lo, float hi) { return fmaxf(lo, fminf(x, hi)); }
 float wrap(float x) { return remainderf(x, 2.0f * kPi); }
@@ -23,6 +35,23 @@ float stick(int16_t raw) {
     const float x = clamp(static_cast<float>(raw) * RC_TO_ONE, -1.0f, 1.0f);
     return fabsf(x) < GIMBAL_RC_DEADZONE ? 0.0f : x;
 }
+
+// Joint-space reference with bounded speed and acceleration. Reset from
+// measured position/velocity when reversing a partially completed movement.
+struct JointTrajectory {
+    float position = 0, velocity = 0;
+    void reset(float p, float v = 0) { position = p; velocity = v; }
+    float advance(float goal, float speed, float accel) {
+        const float delta = goal - position;
+        // Discrete braking margin; do not snap velocity on reversal/arrival.
+        const float desired = copysignf(fminf(speed, fmaxf(0.0f,
+            sqrtf(accel * accel * kDt * kDt + 2 * accel * fabsf(delta)) - accel * kDt)), delta);
+        const float old_velocity = velocity;
+        velocity += clamp(desired - velocity, -accel * kDt, accel * kDt);
+        position += (old_velocity + velocity) * 0.5f * kDt;
+        return position;
+    }
+};
 
 struct Axis {
     DjiMotor motor;

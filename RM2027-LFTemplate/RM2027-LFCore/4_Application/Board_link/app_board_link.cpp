@@ -9,6 +9,7 @@
 #include "cmsis_os.h"
 #include "dvc_communication.hpp"
 #include "lf_core.hpp"
+#include "app_gimbal.h"
 #include "remote_control.h"
 #include "referee.hpp"
 #include "usb.hpp"
@@ -133,6 +134,11 @@ void sendChassisData(uint32_t now_ms) {
     payload.buffer_age_ms = power.buffer_received ? now_ms - power.buffer_tick : 0U;
     payload.power_received = power.power_received ? 1U : 0U;
     payload.buffer_received = power.buffer_received ? 1U : 0U;
+#if GIMBAL_CONTROL_ENABLED && GIMBAL_BIG_YAW_ENABLE
+    taskENTER_CRITICAL();
+    payload.big_yaw_hold_mode = gimbal::g_debug.passage_hold_mode;
+    taskEXIT_CRITICAL();
+#endif
 
 
     taskENTER_CRITICAL();

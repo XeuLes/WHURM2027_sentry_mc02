@@ -100,7 +100,7 @@ IMU 新鲜度表示 INS 发布周期正常，不代表已验证传感器的硬�
 
 ## 板间通信与 USB
 
-板间 `kProtocolVersion` 当前为 **2**：底盘板直接接收遥控器，
+板间 `kProtocolVersion` 当前为 **3**：底盘板直接接收遥控器，
 在 `ChassisToGimbalPayload` 中转发遥控通道、拨杆和键鼠。
 云台板在 `GimbalToChassisPayload` 中发送
 `small_yaw_offset_rad/gimbal_mode`。偏角用于阈值跟随，模式用于区分扫描和自瞄；
@@ -155,3 +155,41 @@ IMU 新鲜度表示 INS 发布周期正常，不代表已验证传感器的硬�
 大小 yaw 跟随回差、机械限位、指令过期、板间/IMU 失联、校准超时与
 CAN 发送失败。未改动现有 `tests/`，未烧录或驱动实物；反馈轴向、
 机械零位、限位及 SMC 参数仍需要实机确认。
+
+## 过洞模式（小 yaw → roll → pitch）
+
+云台板控制小 yaw、roll、pitch，底盘板只协调大 yaw；四轮底盘和发射逻辑不参与此模式。
+左拨杆下档请求进入，离开该档请求退出。输入由
+`GIMBAL_PASS_SWITCH_INDEX/POSITION` 配置，右下档仍为原来的总锁定。
+
+| 阶段 | 云台板 | 大 yaw |
+| --- | --- | --- |
+| PassAlign | 小 yaw 到机械中位、pitch 到过洞停放角、roll 保持直立；位置和相对速度稳定后确认 | 捕获进入时 IMU 朝向并保持，不回机械中位 |
+| PassFold | 收到本阶段确认后，roll 按速度/加速度约束侧翻 | 保持同一个进入朝向 |
+| PassHold | 三个关节机械闭环保持，等待退出请求 | 保持 |
+| PassUnfold | 先使 roll 从实际位置回正，小 yaw/pitch 保持原目标 | 保持 |
+| PassWait | 继续保持；等待右拨杆在进入本阶段后切到新的中/上档 | 保持 |
+| PassFault | 锁定故障、停止输出，不自动立起或切回扫描 | 正常时仍保持原朝向 |
+
+复位期间提前切换右拨杆不会解除 PassWait；退出过洞请求也必须已撤销。
+进入普通模式还要求本地 IMU 可用，随后按当前角度重建普通控制参考。
+过洞期间使用编码器机械角及电机相对速度，不依赖枪管板的 Euler yaw/pitch。
+调试对象 `gimbal::g_debug.joint_control` 表明 yaw/pitch 目标是否为机械关节角；
+`joint_roll_rad/target_roll_rad/roll_command_raw` 用于观察 roll。
+
+云台通过原 `gimbal_mode` 报告阶段；底盘到云台仅新增 `big_yaw_hold_mode` 一字节确认。
+确认必须来自阶段开始后新收到的报文。两板需同步更新 v3 固件；不发送 roll 姿态或额外 ready/age 字段。
+对齐、放倒或回正超过 `GIMBAL_PASS_PHASE_TIMEOUT_MS` 后进入 PassFault。
+断联、锁定、电机/CAN 故障会打断流程，不能自动回普通初始化。
+故障后先右拨杆下档清故障，再解锁，将过洞请求先撤销、再重新触发，才显式执行 roll 回正；
+这次恢复保留当时小 yaw/pitch 的实际机械位置，回正后仍进入 PassWait。
+开机检测到 roll 已明显侧翻时也不会直接自动立起，需按上述显式恢复流程处理。
+
+`GIMBAL_ROLL_*` 的默认 DJI GM6020、CAN2、ID4、机械中值及 SMC 均为占位配置。
+过洞默认 pitch 为机械 0、roll 为单侧 +π/2；方向、限位、速度/加速度、位置/速度容差及稳定时间
+均需按机构实测填写。当前适配器只支持已有 DJI 驱动，其他协议电机需另接驱动。
+三个轴共享 DJI 发送帧时由同一个任务每周期只发送一次。
+
+本机检查包含完整流程、中途取消、未对齐/无确认、超时、断联/电机/CAN 故障、明确恢复、
+侧翻后 IMU 不适用于瞄准时的机械闭环、大 yaw 跨阶段固定朝向、普通扫描/自瞄及轨迹速度/加速度约束。
+这些检查不替代轴向、机械间隙、roll 承载能力和实车运动验证。

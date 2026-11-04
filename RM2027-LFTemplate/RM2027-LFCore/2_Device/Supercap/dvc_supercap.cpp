@@ -22,7 +22,7 @@ bool Supercap::observer_registered_ = false;
 
 bool Supercap::init(const SupercapConfig& config)
 {
-    if (initialized_ || config.bus == nullptr || config.rx_identifier > 0x7FFU
+    if (initialized_ || config.bus == nullptr
         || !validInput(config.max_referee_power_w, 65535.0f)
         || !validInput(config.max_buffer_j, 65535.0f)) { return false; }
     IrqLock lock;
@@ -57,7 +57,7 @@ void Supercap::onCanFrame(FDCAN_HandleTypeDef* bus, const FDCAN_RxHeaderTypeDef*
 
 bool Supercap::update(uint32_t identifier, const uint8_t* data, uint8_t length)
 {
-    if (!initialized_ || identifier != config_.rx_identifier || data == nullptr || length != 8U) {
+    if (!initialized_ || identifier != 0x52U || data == nullptr || length != 8U) {
         return false;
     }
     SupercapFeedback parsed;

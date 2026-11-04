@@ -1,4 +1,4 @@
-// Gimbal board: small yaw and pitch only. The large-yaw controller is separate.
+// Gimbal board: small yaw, roll and pitch. Big yaw is controlled separately.
 #include "app_gimbal.h"
 #include "gimbal_config.h"
 #if GIMBAL_CONTROL_ENABLED && GIMBAL_SMALL_ENABLE
@@ -20,6 +20,13 @@ DebugState g_debug{};
 namespace {
 Axis yaw;
 Axis pitch;
+Axis roll;
+JointTrajectory yaw_path, pitch_path, roll_path;
+float pass_yaw_goal = 0, pass_pitch_goal = GIMBAL_PASS_PITCH_RAD;
+uint32_t phase_start = 0, settled_ms = 0;
+uint32_t last_hold_sequence = 0, phase_hold_sequence = 0;
+uint8_t wait_switch = 0;
+bool passage_fault = false, passage_rearmed = false, hold_ack_seen = false;
 bool initialized = false, imu_seen = false;
 bool calibrated = false, init_failed = false;
 float yaw_total = 0, last_yaw = 0, scan_phase = 0;
@@ -39,6 +46,9 @@ struct ControlCycle {
     bool peer_online = false;
     bool rc_online = false;
     bool stop = false;
+    bool imu_ok = false;
+    bool passage_requested = false;
+    uint8_t hold_ack = 0;
     uint8_t sw = 0;
     int16_t rc_yaw = 0;
     int16_t rc_pitch = 0;
@@ -49,8 +59,18 @@ void setMode(Mode next, float yaw_position, float pitch_position) {
     mode = next;
     // SCAN centers the joint relative to big yaw; other modes aim in IMU space.
     // Reset target history in the new frame so frame changes create no target-rate spike.
-    yaw.reset(next == Mode::kScan ? 0.0f : yaw_position);
-    pitch.reset(pitch_position);
+    yaw.reset(isPassageMode(next) ? yaw.joint : (next == Mode::kScan ? 0.0f : yaw_position));
+    pitch.reset(isPassageMode(next) ? pitch.joint : pitch_position);
+    roll.reset(roll.joint);
+    if (isPassageMode(next)) {
+        yaw_path.reset(yaw.joint, yaw.motor.data().velocity_rad_s);
+        pitch_path.reset(pitch.joint, pitch.motor.data().velocity_rad_s);
+        roll_path.reset(roll.joint, roll.motor.data().velocity_rad_s);
+        phase_start = HAL_GetTick();
+        settled_ms = 0;
+        hold_ack_seen = false;
+        phase_hold_sequence = last_hold_sequence;
+    }
     scan_phase = 0;
 }
 
@@ -60,10 +80,18 @@ void send() {
          pitch.motor.txIdentifier() != yaw.motor.txIdentifier()) {
         ok = DjiMotor::sendGroup(pitch.motor.bus(), pitch.motor.txIdentifier()) && ok;
     }
+    if ((roll.motor.bus() != yaw.motor.bus() ||
+         roll.motor.txIdentifier() != yaw.motor.txIdentifier()) &&
+        (roll.motor.bus() != pitch.motor.bus() ||
+         roll.motor.txIdentifier() != pitch.motor.txIdentifier())) {
+        ok = DjiMotor::sendGroup(roll.motor.bus(), roll.motor.txIdentifier()) && ok;
+    }
     if (!ok) {
         ++g_debug.tx_failures;
         yaw.motor.setCommand(0);
         pitch.motor.setCommand(0);
+        roll.motor.setCommand(0);
+        if (isPassageMode(mode)) { passage_fault = true; passage_rearmed = false; }
         // A FIFO failure cannot retract an old frame. Invalidate calibration
         // so subsequent successful frames cannot resume the old reference.
         calibrated = false;
@@ -83,8 +111,12 @@ void publish(float yaw_pos, float pitch_pos, bool online) {
         yaw_pos + yaw.target - yaw.joint : yaw.target;
     g_debug.yaw_command_raw = yaw.motor.command();
     g_debug.pitch_command_raw = pitch.motor.command();
+    g_debug.joint_roll_rad = roll.joint;
+    g_debug.target_roll_rad = roll.target;
+    g_debug.roll_command_raw = roll.motor.command();
+    g_debug.joint_control = isPassageMode(mode);
     g_debug.ready = online && calibrated && mode != Mode::kFault &&
-                    mode != Mode::kZeroForce;
+                    mode != Mode::kZeroForce && mode != Mode::kPassFault;
     g_debug.following = false;
     g_debug.init_failed = init_failed;
     LuojiaFox::GimbalState state{};
@@ -110,6 +142,7 @@ void observe(ControlCycle& cycle) {
         isfinite(cycle.yaw) && isfinite(cycle.pitch) && isfinite(r) &&
         isfinite(imu.yaw_rate_dps) && isfinite(imu.pitch_rate_dps) &&
         fabsf(cosf(cycle.pitch)) > 0.1f;
+    cycle.imu_ok = imu_ok;
     if (imu_ok) {
         if (!imu_seen) { yaw_total = cycle.yaw; imu_seen = true; }
         else { yaw_total += wrap(cycle.yaw - last_yaw); }
@@ -123,7 +156,7 @@ void observe(ControlCycle& cycle) {
     cycle.pitch_rate = q * cosf(r) - z * sinf(r);
     const bool yaw_ok = yaw.observe(cycle.now);
     const bool pitch_ok = pitch.observe(cycle.now);
-    cycle.online = imu_ok && yaw_ok && pitch_ok;
+    const bool roll_ok = roll.observe(cycle.now);
     cycle.peer_online = board_link::isPeerOnline(cycle.now);
     cycle.rc_online = !getRcOffline();
     const RcControl* rc = getRemoteControlPoint();
@@ -132,8 +165,17 @@ void observe(ControlCycle& cycle) {
         cycle.sw = rc->rc.s[RC_SW_RIGHT];
         cycle.rc_yaw = rc->rc.ch[RC_CH_RIGHT_HORIZONTAL];
         cycle.rc_pitch = rc->rc.ch[RC_CH_RIGHT_VERTICAL];
+        cycle.passage_requested = rc->rc.s[GIMBAL_PASS_SWITCH_INDEX] ==
+                                  GIMBAL_PASS_SWITCH_POSITION;
         taskEXIT_CRITICAL();
     }
+    board_link::ChassisToGimbalPayload remote{};
+    board_link::getRemoteChassisData(&remote);
+    cycle.hold_ack = remote.big_yaw_hold_mode;
+    last_hold_sequence = remote.sequence;
+    const bool mechanical_mode = isPassageMode(mode) || passage_fault ||
+                                 cycle.passage_requested;
+    cycle.online = yaw_ok && pitch_ok && roll_ok && (mechanical_mode || imu_ok);
     cycle.aim_yaw = state.robot_cmd.gimbal_yaw;
     cycle.aim_pitch = state.robot_cmd.gimbal_pitch;
     cycle.aim_valid = GIMBAL_AUTO_AIM_ENABLE && state.robot_cmd.valid &&
@@ -144,22 +186,101 @@ void observe(ControlCycle& cycle) {
 void handleException(ControlCycle& cycle) {
     const bool locked = cycle.sw != RC_SW_MID && cycle.sw != RC_SW_UP;
     if (locked || !cycle.rc_online || !cycle.online || !cycle.peer_online) {
+        if (isPassageMode(mode) ||
+            fabsf(roll.joint - GIMBAL_ROLL_UPRIGHT_RAD) > GIMBAL_PASS_POSITION_TOL_RAD) {
+            passage_fault = true;
+            passage_rearmed = false;
+        }
         calibrated = false;
         if (cycle.rc_online && cycle.sw == RC_SW_DOWN) { init_failed = false; }
         setMode(Mode::kZeroForce, yaw_total, cycle.pitch);
         yaw.reset(yaw_total);
         pitch.reset(cycle.pitch);
+        roll.reset(roll.joint);
         cycle.stop = true;
     } else if (init_failed) {
-        setMode(Mode::kFault, yaw_total, cycle.pitch);
+        setMode(passage_fault ? Mode::kPassFault : Mode::kFault, yaw_total, cycle.pitch);
         yaw.motor.setCommand(0);
         pitch.motor.setCommand(0);
+        roll.motor.setCommand(0);
         cycle.stop = true;
     }
 }
 
+void failPassage(const ControlCycle& cycle) {
+    passage_fault = true;
+    passage_rearmed = false;
+    init_failed = true;
+    setMode(Mode::kPassFault, yaw_total, cycle.pitch);
+}
+
+bool jointSettled(const Axis& axis, float goal) {
+    return fabsf(axis.joint - goal) < GIMBAL_PASS_POSITION_TOL_RAD &&
+           fabsf(axis.motor.data().velocity_rad_s) < GIMBAL_PASS_SPEED_TOL_RAD_S;
+}
+
+void selectPassageMode(const ControlCycle& cycle) {
+    if (mode == Mode::kPassFault) { return; }
+    if (!cycle.passage_requested &&
+        (mode == Mode::kPassAlign || mode == Mode::kPassFold || mode == Mode::kPassHold)) {
+        // Rebuild the trajectory from actual feedback, not the old fold target.
+        setMode(Mode::kPassUnfold, yaw_total, cycle.pitch);
+    }
+    if (mode == Mode::kPassWait) {
+        if (!cycle.passage_requested && cycle.sw != wait_switch && cycle.imu_ok) {
+            calibrated = true;
+            setMode(cycle.sw == RC_SW_MID ? Mode::kManual :
+                (cycle.aim_valid ? Mode::kAutoAim : Mode::kScan), yaw_total, cycle.pitch);
+        }
+        return;
+    }
+    const bool ack = last_hold_sequence != phase_hold_sequence &&
+                     cycle.hold_ack == static_cast<uint8_t>(mode);
+    if (hold_ack_seen && !ack) { failPassage(cycle); return; }
+    hold_ack_seen = hold_ack_seen || ack;
+    const float roll_goal = (mode == Mode::kPassFold || mode == Mode::kPassHold) ?
+        GIMBAL_PASS_ROLL_RAD : GIMBAL_ROLL_UPRIGHT_RAD;
+    const bool settled = ack && jointSettled(yaw, pass_yaw_goal) &&
+        jointSettled(pitch, pass_pitch_goal) && jointSettled(roll, roll_goal);
+    settled_ms = settled ? settled_ms + GIMBAL_PERIOD_MS : 0;
+    if (settled_ms >= GIMBAL_PASS_SETTLE_MS) {
+        if (mode == Mode::kPassAlign) { setMode(Mode::kPassFold, yaw_total, cycle.pitch); }
+        else if (mode == Mode::kPassFold) { setMode(Mode::kPassHold, yaw_total, cycle.pitch); }
+        else if (mode == Mode::kPassUnfold) {
+            wait_switch = cycle.sw;
+            setMode(Mode::kPassWait, yaw_total, cycle.pitch);
+        }
+    }
+    if ((mode == Mode::kPassAlign || mode == Mode::kPassFold || mode == Mode::kPassUnfold) &&
+        cycle.now - phase_start >= GIMBAL_PASS_PHASE_TIMEOUT_MS) { failPassage(cycle); }
+}
+
 void selectMode(ControlCycle& cycle) {
     if (cycle.stop) { return; }
+    if (passage_fault) {
+        setMode(Mode::kPassFault, yaw_total, cycle.pitch);
+        if (!cycle.passage_requested) { passage_rearmed = true; }
+        if (cycle.passage_requested && passage_rearmed && !init_failed) {
+            // Explicit retry recovers roll first, retaining current yaw/pitch.
+            pass_yaw_goal = yaw.joint;
+            pass_pitch_goal = pitch.joint;
+            passage_fault = false;
+            passage_rearmed = false;
+            setMode(Mode::kPassUnfold, yaw_total, cycle.pitch);
+        }
+        return;
+    }
+    if (isPassageMode(mode)) { selectPassageMode(cycle); return; }
+    // A folded assembly must not be straightened by ordinary initialization.
+    if (fabsf(roll.joint - GIMBAL_ROLL_UPRIGHT_RAD) > GIMBAL_PASS_POSITION_TOL_RAD) {
+        failPassage(cycle); return;
+    }
+    if (cycle.passage_requested) {
+        pass_yaw_goal = 0;
+        pass_pitch_goal = GIMBAL_PASS_PITCH_RAD;
+        setMode(Mode::kPassAlign, yaw_total, cycle.pitch);
+        return;
+    }
     if (!calibrated) {
         if (mode != Mode::kInit) {
             setMode(Mode::kInit, yaw_total, cycle.pitch);
@@ -174,6 +295,23 @@ void selectMode(ControlCycle& cycle) {
 
 void updateReference(const ControlCycle& cycle) {
     if (cycle.stop) { return; }
+    if (isPassageMode(mode)) {
+        if (mode == Mode::kPassFault) { return; }
+        yaw.target = yaw_path.advance(pass_yaw_goal,
+            GIMBAL_PASS_JOINT_SPEED_RAD_S, GIMBAL_PASS_JOINT_ACCEL_RAD_S2);
+        pitch.target = pitch_path.advance(pass_pitch_goal,
+            GIMBAL_PASS_JOINT_SPEED_RAD_S, GIMBAL_PASS_JOINT_ACCEL_RAD_S2);
+        float roll_goal = GIMBAL_ROLL_UPRIGHT_RAD;
+        if (mode == Mode::kPassFold || mode == Mode::kPassHold) {
+            // Wait for acknowledgement of this phase before starting roll.
+            roll_goal = hold_ack_seen ? GIMBAL_PASS_ROLL_RAD : roll_path.position;
+        }
+        if (mode == Mode::kPassUnfold && !hold_ack_seen) { roll_goal = roll_path.position; }
+        roll.target = roll_path.advance(roll_goal, GIMBAL_ROLL_SPEED_RAD_S,
+                                      GIMBAL_ROLL_ACCEL_RAD_S2);
+        return;
+    }
+    roll.target = GIMBAL_ROLL_UPRIGHT_RAD;
     if (!calibrated) {
         // Center both encoders in the current IMU frame.
         yaw.target = yaw_total - yaw.joint;
@@ -207,26 +345,33 @@ void updateReference(const ControlCycle& cycle) {
 
 void calculateOutput(const ControlCycle& cycle) {
     if (cycle.stop) { return; }
-    if (mode == Mode::kFault) {
+    if (mode == Mode::kFault || mode == Mode::kPassFault) {
         yaw.motor.setCommand(0);
         pitch.motor.setCommand(0);
+        roll.motor.setCommand(0);
         return;
     }
     // Relative motor velocity excludes big-yaw rotation. Using IMU yaw rate
     // here would brake the parent rotation even when the small joint is centered.
-    const bool center_joint = mode == Mode::kScan;
+    const bool joint_mode = isPassageMode(mode);
+    const bool center_joint = mode == Mode::kScan || joint_mode;
     const float yaw_position = center_joint ? yaw.joint : yaw_total;
     const float yaw_rate = center_joint ? yaw.motor.data().velocity_rad_s : cycle.yaw_rate;
     yaw.target = clamp(yaw.target, yaw_position + GIMBAL_SMALL_YAW_MIN_RAD - yaw.joint,
                                       yaw_position + GIMBAL_SMALL_YAW_MAX_RAD - yaw.joint);
+    const float pitch_position = joint_mode ? pitch.joint : cycle.pitch;
+    const float pitch_rate = joint_mode ? pitch.motor.data().velocity_rad_s : cycle.pitch_rate;
     pitch.target = clamp(pitch.target,
-        cycle.pitch + GIMBAL_PITCH_MIN_RAD - pitch.joint,
-        cycle.pitch + GIMBAL_PITCH_MAX_RAD - pitch.joint);
+        pitch_position + GIMBAL_PITCH_MIN_RAD - pitch.joint,
+        pitch_position + GIMBAL_PITCH_MAX_RAD - pitch.joint);
     const bool y_valid = yaw.control(yaw_position, yaw_rate, true,
         GIMBAL_SMALL_YAW_MIN_RAD, GIMBAL_SMALL_YAW_MAX_RAD);
-    const bool p_valid = pitch.control(cycle.pitch, cycle.pitch_rate, true,
+    const bool p_valid = pitch.control(pitch_position, pitch_rate, true,
         GIMBAL_PITCH_MIN_RAD, GIMBAL_PITCH_MAX_RAD);
-    if (!y_valid || !p_valid) {
+    const bool r_valid = roll.control(roll.joint, roll.motor.data().velocity_rad_s, true,
+        GIMBAL_ROLL_MIN_RAD, GIMBAL_ROLL_MAX_RAD);
+    if (!y_valid || !p_valid || !r_valid) {
+        if (joint_mode) { failPassage(cycle); return; }
         init_failed = true;
         setMode(Mode::kFault, yaw_total, cycle.pitch);
     }
@@ -239,22 +384,29 @@ extern "C" bool Gimbal_Init(void) {
     if (initialized) { return true; }
     const float yaw_params[9] = GIMBAL_YAW_SMC_PARAMS;
     const float pitch_params[9] = GIMBAL_PITCH_SMC_PARAMS;
+    const float roll_params[9] = GIMBAL_ROLL_SMC_PARAMS;
     bool ok = yaw.init(GIMBAL_YAW_TYPE, GIMBAL_YAW_CAN, GIMBAL_YAW_ID,
             GIMBAL_YAW_DIRECTION, GIMBAL_YAW_RATIO, GIMBAL_YAW_MID_ECD,
             yaw_params, EXPONENT, GIMBAL_YAW_OUTPUT_MAX) &&
              pitch.init(GIMBAL_PITCH_TYPE, GIMBAL_PITCH_CAN, GIMBAL_PITCH_ID,
             GIMBAL_PITCH_DIRECTION, GIMBAL_PITCH_RATIO, GIMBAL_PITCH_MID_ECD,
-            pitch_params, EISMC, GIMBAL_PITCH_OUTPUT_MAX);
+            pitch_params, EISMC, GIMBAL_PITCH_OUTPUT_MAX) &&
+             roll.init(GIMBAL_ROLL_TYPE, GIMBAL_ROLL_CAN, GIMBAL_ROLL_ID,
+            GIMBAL_ROLL_DIRECTION, GIMBAL_ROLL_RATIO, GIMBAL_ROLL_MID_ECD,
+            roll_params, EXPONENT, GIMBAL_ROLL_OUTPUT_MAX);
     // One task must own each shared DJI TX frame. Reject groups already
     // driven by the chassis or another application, even with different slots.
     for (uint8_t i = 0; ok && i < MotorBase::motorCount(); ++i) {
         const MotorBase* other = MotorBase::motorAt(i);
         if (other == &yaw.motor) { continue; }
         if (other == &pitch.motor) { continue; }
+        if (other == &roll.motor) { continue; }
         bool shared = other->bus() == yaw.motor.bus() &&
                       other->txIdentifier() == yaw.motor.txIdentifier();
         shared = shared || (other->bus() == pitch.motor.bus() &&
                             other->txIdentifier() == pitch.motor.txIdentifier());
+        shared = shared || (other->bus() == roll.motor.bus() &&
+                            other->txIdentifier() == roll.motor.txIdentifier());
         if (shared) {
             ok = false;
         }

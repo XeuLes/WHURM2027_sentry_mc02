@@ -1,7 +1,7 @@
 # 超级电容移植说明
 
 本模块按用户提供的 `superpower_task.c/.h` 和《超级电容文件.docx》移植，仅实现该资料中的
-`0x61` 控制及新版反馈。已移除此前额外加入的旧版 `0x210/0x211` 兼容分支。
+`0x61` 控制及 `0x52` 反馈，不保留其他超电协议分支。
 
 ## 工程内分工
 
@@ -10,7 +10,7 @@
 | `Core/Src/freertos.c` 用户代码区 | 定义 `SUPERPOWER` 静态线程，256 字栈，`osPriorityAboveNormal`；初始化成功后创建 |
 | `app_supercap.cpp` | `superpower_task()` 入口、裁判数据读取、每 1 ms 发送和状态查询 |
 | `2_Device/Supercap/dvc_supercap.cpp` | 按文档打包/解析 8 字节 CAN 帧、有效数据缓存、反馈在线检测 |
-| `supercap_config.h` | CAN 口、反馈 ID、发送周期、超时和充电限制比例 |
+| `supercap_config.h` | CAN 口、发送周期、超时和充电限制比例 |
 
 应用内不调用 `osThreadCreate()`，主函数不再调用超电初始化。
 `MX_FREERTOS_Init()` 中先调用 `supercapInit()` 注册设备，成功才创建线程。
@@ -41,9 +41,8 @@ FDCAN 中断分发。没有复制外部 `can_service` 或另写 HAL 接收回调
 ## 配置与使用
 
 默认 CAN1，参考旧工程底盘的 `CHASSIS_CAN=1`。
-`SUPERCAP_FEEDBACK_CAN_ID` 当前为 `0x800`，仅是待填写标记，不是真实反馈 ID。
-未填写时 `supercapInit()` 返回 false，FreeRTOS 不创建超电线程。
-确认反馈 ID 后修改宏并重新编译，线程将由 FreeRTOS 自动创建，不用再在 main 里调用。
+新版反馈 ID 已确认是 `0x52`，在驱动接收逻辑中固定匹配；无反馈 ID 宏或运行时配置项。
+正式应用和本地 tune 都复用驱动按总线、ID、帧类型及长度过滤反馈。
 
 运行时可调用：
 
@@ -74,7 +73,7 @@ CAN 收发诊断可查询现有 `bspFdcanGetStats()`。
 
 代码显式打包字节，避免直接 memcpy 位域结构体造成编译器布局依赖。
 
-反馈按照文档解析：byte0 状态字；byte1–2 底盘功率、byte3–4 裁判侧功率，均为小端
+反馈帧 ID 为 `0x52`，按照文档解析：byte0 状态字；byte1–2 底盘功率、byte3–4 裁判侧功率，均为小端
 uint16 后按 `(raw-16384)/64` 转 float；byte5–6 底盘允许功率 W；byte7 能量原始值。
 保留功率的小数和负值；状态位定义和能量量纲未提供，因此只保留原始值。
 总线/ID/帧类型/长度不符不更新反馈。默认反馈超时为 100 ms。
@@ -101,6 +100,15 @@ if (supercapGetChassisPowerLimit(&watts)) {
 ## 验证
 
 `python tests/run_host_tests.py` 执行算法、遥控器和计时等主机回归，不包含超电测试。
-本次主固件和本地调参固件均编译通过；临时超电检查位于 `build/snapshot_cleanup`，
-覆盖 tick 为零、超时边界、节拍回绕、反馈复位、控制帧字节、无效预算拒绝和裁判失联失能。
-`tests` 目录保持原样。以上检查不替代实际反馈 ID 确认和上板验证。
+本次正式底盘固件和本地调参固件均编译通过；临时超电检查位于 `build/supercap_protocol_audit/protocol_check.cpp`，
+覆盖默认反馈ID为0x52、错误ID/总线/帧类型/长度拒收，以及tick为零、超时边界、节拍回绕、
+反馈复位、控制帧字节、无效预算拒绝和裁判失联失能。
+`tests` 目录保持原样。反馈 ID 已由用户确认；编译和主机检查不替代上板验证。
+
+## 实现范围
+
+仅保留本资料的协议实现：设备层dvc_supercap、应用层app_supercap、配置supercap_config，
+以及Core/Src/freertos.c中的任务创建。tune复用同一设备驱动，固定数据调试不依赖裁判系统。
+旧独立app_supercap_test源码已归档到build/supercap_protocol_audit/legacy_supercap_test.zip，
+不再参与源码扫描与编译；唯一调试入口仍是Motor/tools/mc02_tune.py。
+发送显式打包8字节，反馈功率使用float保留文档换算结果的小数/负值，不复制示例uint16截断。

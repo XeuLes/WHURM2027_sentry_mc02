@@ -54,10 +54,8 @@ void superpower_task(void const* argument)
 bool supercapInit(void)
 {
     if (initialized) { return true; }
-    if (SUPERCAP_FEEDBACK_CAN_ID > 0x7FFU) { return false; }
     SupercapConfig config;
     config.bus = bspFdcanGetHandle(SUPERCAP_CAN_INDEX);
-    config.rx_identifier = SUPERCAP_FEEDBACK_CAN_ID;
     config.offline_timeout_ms = SUPERCAP_FEEDBACK_TIMEOUT_MS;
     config.max_referee_power_w = SUPERCAP_MAX_REFEREE_POWER_W;
     config.max_buffer_j = SUPERCAP_MAX_BUFFER_J;

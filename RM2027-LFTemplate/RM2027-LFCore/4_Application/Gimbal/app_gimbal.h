@@ -13,8 +13,12 @@ LF_EXTERN_C void Gimbal_Task(void const* argument);
 #include <stdint.h>
 namespace gimbal {
 enum class Mode : uint8_t {
-    kZeroForce = 0, kInit, kGap, kManual, kScan, kAutoAim, kFollow, kFault
+    kZeroForce = 0, kInit, kGap, kManual, kScan, kAutoAim, kFollow, kFault,
+    kPassAlign, kPassFold, kPassHold, kPassUnfold, kPassWait, kPassFault
 };
+inline bool isPassageMode(Mode mode) {
+    return mode >= Mode::kPassAlign && mode <= Mode::kPassFault;
+}
 struct DebugState {
     Mode mode;
     float yaw_rad, pitch_rad;
@@ -23,6 +27,10 @@ struct DebugState {
     int16_t yaw_command_raw, pitch_command_raw;
     bool ready, following, init_failed;
     uint32_t tx_failures;
+    float joint_roll_rad, target_roll_rad;
+    int16_t roll_command_raw;
+    uint8_t passage_hold_mode;
+    bool joint_control;
 };
 extern DebugState g_debug;
 } // namespace gimbal

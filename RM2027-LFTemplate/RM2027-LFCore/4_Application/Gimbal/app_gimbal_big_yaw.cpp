@@ -74,6 +74,11 @@ void publishLocalState(float yaw_pos, float pitch_pos, bool online) {
                     mode != Mode::kZeroForce;
     g_debug.following = following;
     g_debug.init_failed = init_failed;
+    // One-byte acknowledgement is published only after a successful control/send cycle.
+    taskENTER_CRITICAL();
+    g_debug.passage_hold_mode = (g_debug.ready && !init_failed && isPassageMode(mode)) ?
+        static_cast<uint8_t>(mode) : 0U;
+    taskEXIT_CRITICAL();
 }
 
 void observe(ControlCycle& cycle) {
@@ -130,6 +135,15 @@ void handleException(ControlCycle& cycle) {
 
 void selectMode(ControlCycle& cycle) {
     if (cycle.stop) { return; }
+    const Mode requested = static_cast<Mode>(cycle.remote.gimbal_mode);
+    if (isPassageMode(requested)) {
+        // Capture once on entry; phase changes must not reset the held heading.
+        if (!isPassageMode(mode)) { setMode(requested, yaw_total, cycle.pitch); }
+        else { mode = requested; }
+        calibrated = true;
+        following = false;
+        return;
+    }
     if (!calibrated) {
         if (mode != Mode::kInit) {
             setMode(Mode::kInit, yaw_total, cycle.pitch);

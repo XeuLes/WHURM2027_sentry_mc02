@@ -179,7 +179,7 @@ void MX_FREERTOS_Init(void) {
   }
 #endif
 #if BOARD_ROLE == 1
-  /* 超电与裁判系统均在底盘板；反馈 ID 未配置时不创建任务。 */
+  /* 超电与裁判系统均在底盘板；0x52 反馈设备初始化成功后创建任务。 */
   if (supercapInit()) {
     osThreadStaticDef(SUPERPOWER, superpower_task, osPriorityAboveNormal, 0, 256,
                       SUPERPOWER_TaskBuffer, &SUPERPOWER_TaskControlBlock);
