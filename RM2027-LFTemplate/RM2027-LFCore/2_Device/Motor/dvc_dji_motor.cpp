@@ -146,7 +146,7 @@ bool DjiMotor::update(uint32_t identifier, const uint8_t* data, uint8_t length)
     data_.velocity_rpm = velocity_rpm;
     data_.current_raw = current_raw;
     data_.current_a = (float)current_raw * feedback_current_a_per_lsb_ * (float)direction();
-    data_.temperature_valid = type() != MotorType::DjiM2006;
+    data_.temperature_valid = type() != MotorType::DjiM2006;   //2006无温度回传
     data_.temperature = data_.temperature_valid ? data[6] : 0U;
     data_.error_code = type() == MotorType::DjiGm6020 ? 0U : data[7];
     data_.velocity_rad_s =
@@ -240,11 +240,13 @@ bool DjiMotor::sendFrame(
     return bspFdcanSend(bus, identifier, data, 8U);
 }
 
+
 bool DjiMotor::sendGroup(FDCAN_HandleTypeDef* bus, uint32_t identifier)
 {
     if (bus == nullptr) { return false; }
     int16_t current[4] = {};
     bool matched = false;
+    //{}：局部作用域
     {
         MotorCriticalSection lock;
         for (uint8_t i = 0; i < motorCount(); ++i) {
@@ -253,7 +255,7 @@ bool DjiMotor::sendGroup(FDCAN_HandleTypeDef* bus, uint32_t identifier)
                 || (base->type() != MotorType::DjiGm6020
                     && base->type() != MotorType::DjiM3508
                     && base->type() != MotorType::DjiM2006)) { continue; }
-            DjiMotor* motor = static_cast<DjiMotor*>(base);
+            DjiMotor* motor = static_cast<DjiMotor*>(base);//编译期转换，把父类 MotorBase* 指针，转成子类 DjiMotor* 指针
             current[motor->txSlot()] = static_cast<int16_t>(motor->command() * motor->direction());
             matched = true;
         }

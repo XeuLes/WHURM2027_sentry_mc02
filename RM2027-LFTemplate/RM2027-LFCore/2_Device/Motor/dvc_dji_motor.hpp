@@ -130,7 +130,7 @@ public:
 private:
     DjiMotorData data_;
     int16_t command_;
-    float feedback_current_a_per_lsb_;
+    float feedback_current_a_per_lsb_;  //DJI 电机反馈电流的换算系数
 };
 
 /************************ COPYRIGHT(C) WHU-LuojiaFox **************************/

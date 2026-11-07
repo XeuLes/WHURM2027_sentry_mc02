@@ -59,6 +59,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define POWER_5V_Pin GPIO_PIN_15
 #define POWER_5V_GPIO_Port GPIOC
+#define BUZZER__PWM_Pin GPIO_PIN_15
+#define BUZZER__PWM_GPIO_Port GPIOB
 #define ACCEL_CS_Pin GPIO_PIN_0
 #define ACCEL_CS_GPIO_Port GPIOC
 #define GYRO_CS_Pin GPIO_PIN_3

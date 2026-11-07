@@ -27,6 +27,8 @@
 #include "lf_core.hpp"
 #include "tim.h"
 
+#include <cmath>
+
 /* Attitude solver selection ------------------------------------------------*/
 /**
  * @brief 选择解算方式
@@ -130,6 +132,13 @@ static void insTaskInit(void);
  * @param temp  measure of the BMI088 temperature.
  */
 static void BMI088_Temp_Control(float temp);
+
+/**
+ * @brief 由当前姿态扣除重力，得到机体坐标系线性加速度。
+ * @note BMI088 驱动按 ±6 g 量程输出的 accel[] 单位仍为 g；
+ *       本函数先在 g 域去除重力，再统一换算为 m/s²。
+ */
+static void UpdateLinearAcceleration(void);
 
 #if BMI088_Warm_Calib_Enable
 /**
@@ -245,13 +254,19 @@ extern "C" void INS_Task(void const* argument) {
         ins_info.yaw_gyro = ins_info.gyro[IMU_GYRO_INDEX_YAW] * RADIANS_TO_DEGREES;
         ins_info.roll_gyro = ins_info.gyro[IMU_GYRO_INDEX_ROLL] * RADIANS_TO_DEGREES;
 
+        UpdateLinearAcceleration();
+
         LuojiaFox::system_state.updateImu(
             { ins_info.yaw_angle,
               ins_info.pitch_angle,
               ins_info.roll_angle,
               ins_info.yaw_gyro,
               ins_info.pitch_gyro,
-              ins_info.roll_gyro }
+              ins_info.roll_gyro,
+              ins_info.linear_accel[0],
+              ins_info.linear_accel[1],
+              ins_info.accel_valid,
+              HAL_GetTick() }
         );
 
         /* 温控每 5 ms 跑一次，与 PID 初始化时的 dt = 0.005f 对应 */
@@ -291,6 +306,10 @@ static void insTaskInit(void) {
     ins_info.accel[0] = 0.f;
     ins_info.accel[1] = 0.f;
     ins_info.accel[2] = 0.f;
+    ins_info.linear_accel[0] = 0.f;
+    ins_info.linear_accel[1] = 0.f;
+    ins_info.linear_accel[2] = 0.f;
+    ins_info.accel_valid = false;
 
     /* Initializes the Second order lowpass filter  */
     lowPassFilter2pInit(&ins_accel_pf2p[0], ins_lpf2p_alpha);
@@ -329,6 +348,71 @@ static void insTaskInit(void) {
         quaternion_ekf_p_data
     );
 #endif
+}
+
+//------------------------------------------------------------------------------
+static void UpdateLinearAcceleration(void) {
+    float q0 = 0.0f;
+    float q1 = 0.0f;
+    float q2 = 0.0f;
+    float q3 = 0.0f;
+    bool attitude_ready = false;
+
+#if INS_USE_MAHONY
+    attitude_ready = Mahony_Info.Init;
+    q0 = Mahony_Info.q0;
+    q1 = Mahony_Info.q1;
+    q2 = Mahony_Info.q2;
+    q3 = Mahony_Info.q3;
+#else
+    attitude_ready = quaternion_info.initialized;
+    q0 = quaternion_info.quat[0];
+    q1 = quaternion_info.quat[1];
+    q2 = quaternion_info.quat[2];
+    q3 = quaternion_info.quat[3];
+#endif
+
+    // BMI088_ACCEL_6G_SEN 的换算结果为 g，因此范围判断也在 g 域完成。
+    const float accel_norm_squared_g =
+        ins_info.accel[0] * ins_info.accel[0]
+        + ins_info.accel[1] * ins_info.accel[1]
+        + ins_info.accel[2] * ins_info.accel[2];
+    constexpr float minimum_norm_g = 0.5f;
+    constexpr float maximum_norm_g = 2.0f;
+    const bool accel_in_range =
+        accel_norm_squared_g >= minimum_norm_g * minimum_norm_g
+        && accel_norm_squared_g <= maximum_norm_g * maximum_norm_g;
+
+    if (!attitude_ready || !accel_in_range) {
+        ins_info.linear_accel[0] = 0.0f;
+        ins_info.linear_accel[1] = 0.0f;
+        ins_info.linear_accel[2] = 0.0f;
+        ins_info.accel_valid = false;
+        return;
+    }
+
+    // 与四元数 EKF 观测模型一致：静止水平时重力方向为 +Z。
+    const float gravity_body[3] = {
+        2.0f * (q1 * q3 - q0 * q2),
+        2.0f * (q0 * q1 + q2 * q3),
+        q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3
+    };
+
+    // 先在 g 域消除重力，再统一换算为 m/s²，供底盘速度融合使用。
+    for (uint8_t axis = 0U; axis < 3U; ++axis) {
+        ins_info.linear_accel[axis] =
+            (ins_info.accel[axis] - gravity_body[axis]) * GRAVITY_ACCEL;
+    }
+
+    ins_info.accel_valid =
+        std::isfinite(ins_info.linear_accel[0])
+        && std::isfinite(ins_info.linear_accel[1])
+        && std::isfinite(ins_info.linear_accel[2]);
+    if (!ins_info.accel_valid) {
+        ins_info.linear_accel[0] = 0.0f;
+        ins_info.linear_accel[1] = 0.0f;
+        ins_info.linear_accel[2] = 0.0f;
+    }
 }
 
 //------------------------------------------------------------------------------

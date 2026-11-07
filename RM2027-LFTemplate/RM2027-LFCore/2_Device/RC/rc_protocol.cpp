@@ -1,4 +1,7 @@
 // Remote protocol decoding derived from Polarbear remote_control (2018-2025).
+//s[0] ← 第 5 通道：`SB`
+//s[1] ← 第 8 通道：`SC`
+
 
 #include "rc_protocol.hpp"
 
@@ -59,9 +62,15 @@ static void clearSpecialChannels(RcControl* control) {
 }
 
 static char decodeSwitch(uint16_t value, int offset, int span) {
-    constexpr char SWITCH_MAPPING[3] = { RC_SW_UP, RC_SW_MID, RC_SW_DOWN };
-    const int index = basic_math::constrain((int(value) - offset) / span + 1, 0, 2);
-    return SWITCH_MAPPING[index];
+    const int position = static_cast<int>(value) - offset;
+    const int threshold = span / 3;
+    if (position < -threshold) {
+        return RC_SW_UP;
+    }
+    if (position > threshold) {
+        return RC_SW_DOWN;
+    }
+    return RC_SW_MID;
 }
 
 static void sbusToControl(volatile const uint8_t* buffer, RcControl* control, SbusData& sbus) {
@@ -84,7 +93,8 @@ static void sbusToControl(volatile const uint8_t* buffer, RcControl* control, Sb
     constexpr int OFFSET = ET08A_RC_CH_VALUE_OFFSET;
     constexpr float SCALE = 660.0f / 671.0f;
     constexpr int SWITCH_SPAN = 670;
-    constexpr uint8_t SWITCH_CHANNELS[4] = { 4, 5, 6, 7 };
+    // 当前 ET08A 配置：第 7 通道为 SB，第 8 通道为 SC。
+    constexpr uint8_t SWITCH_CHANNELS[4] = { 6, 7, 4, 5 };
     if (buffer[23] != ET08A_RC_CONNECTED_FLAG) {
         for (int index = 0; index < 4; ++index) {
             control->rc.ch[index] = 0;

@@ -100,6 +100,13 @@ Config defaultConfig() {
     config.initial_acceleration_variance = 4.0f;
     config.correction_gain_per_rad_s = 0.05f;
     config.max_correction_mps = 0.25f;
+    config.slip_detection_enabled = true;
+    config.slip_min_speed_mps = 0.05f;
+    config.slip_score_enter = 0.35f;
+    config.slip_score_exit = 0.15f;
+    config.slip_score_filter_alpha = 0.60f;
+    config.slip_enter_hold_s = 0.005f;
+    config.slip_exit_hold_s = 0.020f;
     return config;
 }
 
@@ -117,7 +124,22 @@ bool OmniMotionCompensator::configValid(const Config& config) {
         && std::isfinite(config.correction_gain_per_rad_s)
         && config.correction_gain_per_rad_s >= 0.0f
         && std::isfinite(config.max_correction_mps)
-        && config.max_correction_mps >= 0.0f;
+        && config.max_correction_mps >= 0.0f
+        && std::isfinite(config.slip_min_speed_mps)
+        && config.slip_min_speed_mps >= 0.0f
+        && std::isfinite(config.slip_score_enter)
+        && config.slip_score_enter > 0.0f
+        && config.slip_score_enter <= 1.0f
+        && std::isfinite(config.slip_score_exit)
+        && config.slip_score_exit >= 0.0f
+        && config.slip_score_exit < config.slip_score_enter
+        && std::isfinite(config.slip_score_filter_alpha)
+        && config.slip_score_filter_alpha >= 0.0f
+        && config.slip_score_filter_alpha < 1.0f
+        && std::isfinite(config.slip_enter_hold_s)
+        && config.slip_enter_hold_s >= 0.0f
+        && std::isfinite(config.slip_exit_hold_s)
+        && config.slip_exit_hold_s >= 0.0f;
 }
 
 bool OmniMotionCompensator::init() {
@@ -144,6 +166,21 @@ void OmniMotionCompensator::reset() {
     valid_wheel_mask_ = 0U;
     initialized_ = false;
     velocity_measurement_valid_ = false;
+    predicted_vx_mps_ = 0.0f;
+    predicted_vy_mps_ = 0.0f;
+    resetSlipState();
+}
+
+void OmniMotionCompensator::resetSlipState() {
+    for (uint8_t wheel = 0U; wheel < kWheelCount; ++wheel) {
+        slip_velocity_mps_[wheel] = 0.0f;
+        slip_score_[wheel] = 0.0f;
+        slip_confidence_[wheel] = 1.0f;
+        slip_enter_time_s_[wheel] = 0.0f;
+        slip_exit_time_s_[wheel] = 0.0f;
+    }
+    slip_wheel_mask_ = 0U;
+    slip_detection_valid_ = false;
 }
 
 void OmniMotionCompensator::resetAxis(
@@ -304,6 +341,177 @@ bool OmniMotionCompensator::solveVelocity(
     return true;
 }
 
+bool OmniMotionCompensator::solveVelocityWeighted(
+    const float wheel_linear_velocity_mps[kWheelCount],
+    uint8_t valid_mask,
+    float yaw_rad,
+    const float confidence[kWheelCount],
+    float* vx_mps,
+    float* vy_mps,
+    float* confidence_sum
+) {
+    if (wheel_linear_velocity_mps == nullptr || confidence == nullptr
+        || vx_mps == nullptr || vy_mps == nullptr || confidence_sum == nullptr
+        || !std::isfinite(yaw_rad)) {
+        return false;
+    }
+
+    const float sin_yaw = std::sin(yaw_rad);
+    const float cos_yaw = std::cos(yaw_rad);
+    double ata[3][3] = {};
+    double atb[3] = {};
+    double total_confidence = 0.0;
+
+    for (uint8_t wheel = 0U; wheel < kWheelCount; ++wheel) {
+        if ((valid_mask & static_cast<uint8_t>(1U << wheel)) == 0U
+            || !std::isfinite(wheel_linear_velocity_mps[wheel])
+            || !std::isfinite(confidence[wheel])
+            || confidence[wheel] <= 0.0f) {
+            continue;
+        }
+
+        const double weight = static_cast<double>(confidence[wheel]);
+        const float row[3] = {
+            cos_yaw * kWheelBaseX[wheel] - sin_yaw * kWheelBaseY[wheel],
+            sin_yaw * kWheelBaseX[wheel] + cos_yaw * kWheelBaseY[wheel],
+            -1.0f
+        };
+        for (uint8_t i = 0U; i < 3U; ++i) {
+            atb[i] += weight * static_cast<double>(row[i])
+                    * static_cast<double>(wheel_linear_velocity_mps[wheel]);
+            for (uint8_t j = 0U; j < 3U; ++j) {
+                ata[i][j] += weight * static_cast<double>(row[i])
+                           * static_cast<double>(row[j]);
+            }
+        }
+        total_confidence += weight;
+    }
+
+    if (total_confidence <= 0.0) {
+        return false;
+    }
+
+    double augmented[3][4] = {};
+    for (uint8_t row = 0U; row < 3U; ++row) {
+        for (uint8_t column = 0U; column < 3U; ++column) {
+            augmented[row][column] = ata[row][column];
+        }
+        augmented[row][3] = atb[row];
+    }
+
+    double solution[3] = {};
+    if (!solve3x3(augmented, solution)
+        || !std::isfinite(solution[0])
+        || !std::isfinite(solution[1])) {
+        return false;
+    }
+
+    *vx_mps = static_cast<float>(solution[0]);
+    *vy_mps = static_cast<float>(solution[1]);
+    *confidence_sum = static_cast<float>(total_confidence);
+    return true;
+}
+
+void OmniMotionCompensator::updateSlipDetection(
+    const Measurement& measurement,
+    float predicted_vx_mps,
+    float predicted_vy_mps
+) {
+    if (!config_.slip_detection_enabled
+        || !measurement.acceleration_valid
+        || !measurement.yaw_rate_valid
+        || !std::isfinite(measurement.acceleration_x_mps2)
+        || !std::isfinite(measurement.acceleration_y_mps2)
+        || !std::isfinite(measurement.yaw_rad)
+        || !std::isfinite(measurement.yaw_rate_rad_s)
+        || !std::isfinite(measurement.wheel_radius_m)
+        || measurement.wheel_radius_m <= 0.0f
+        || !std::isfinite(predicted_vx_mps)
+        || !std::isfinite(predicted_vy_mps)) {
+        resetSlipState();
+        return;
+    }
+
+    const float sin_yaw = std::sin(measurement.yaw_rad);
+    const float cos_yaw = std::cos(measurement.yaw_rad);
+    const uint8_t previous_slip_mask = slip_wheel_mask_;
+    slip_wheel_mask_ = 0U;
+
+    for (uint8_t wheel = 0U; wheel < kWheelCount; ++wheel) {
+        const uint8_t wheel_bit = static_cast<uint8_t>(1U << wheel);
+        if ((measurement.valid_wheel_mask & wheel_bit) == 0U
+            || !std::isfinite(measurement.wheel_linear_velocity_mps[wheel])) {
+            slip_velocity_mps_[wheel] = 0.0f;
+            slip_score_[wheel] = 0.0f;
+            slip_confidence_[wheel] = 0.0f;
+            slip_enter_time_s_[wheel] = 0.0f;
+            slip_exit_time_s_[wheel] = 0.0f;
+            continue;
+        }
+
+        const float row_x =
+            cos_yaw * kWheelBaseX[wheel] - sin_yaw * kWheelBaseY[wheel];
+        const float row_y =
+            sin_yaw * kWheelBaseX[wheel] + cos_yaw * kWheelBaseY[wheel];
+        const float expected_wheel_speed =
+            row_x * predicted_vx_mps + row_y * predicted_vy_mps
+            - measurement.wheel_radius_m * measurement.yaw_rate_rad_s;
+        const float actual_wheel_speed =
+            measurement.wheel_linear_velocity_mps[wheel];
+        const float residual = actual_wheel_speed - expected_wheel_speed;
+        const float speed_scale = std::fmax(
+            std::fabs(actual_wheel_speed),
+            std::fabs(expected_wheel_speed)
+        );
+
+        const float raw_score =
+            speed_scale < config_.slip_min_speed_mps
+                ? 0.0f
+                : std::fmin(std::fabs(residual) / speed_scale, 1.0f);
+        const float alpha = config_.slip_score_filter_alpha;
+        const float score = alpha * slip_score_[wheel]
+            + (1.0f - alpha) * raw_score;
+
+        slip_velocity_mps_[wheel] = residual;
+        slip_score_[wheel] = score;
+
+        bool slipping = (previous_slip_mask & wheel_bit) != 0U;
+        if (score >= config_.slip_score_enter) {
+            slip_exit_time_s_[wheel] = 0.0f;
+            if (slipping) {
+                slip_enter_time_s_[wheel] = 0.0f;
+            } else {
+                slip_enter_time_s_[wheel] += measurement.dt_s;
+                if (slip_enter_time_s_[wheel] >= config_.slip_enter_hold_s) {
+                    slipping = true;
+                }
+            }
+        } else if (score <= config_.slip_score_exit) {
+            slip_enter_time_s_[wheel] = 0.0f;
+            if (slipping) {
+                slip_exit_time_s_[wheel] += measurement.dt_s;
+                if (slip_exit_time_s_[wheel] >= config_.slip_exit_hold_s) {
+                    slipping = false;
+                }
+            } else {
+                slip_exit_time_s_[wheel] = 0.0f;
+            }
+        } else {
+            // 位于迟滞区间内时保持当前状态，不累计进入或退出时间。
+            slip_enter_time_s_[wheel] = 0.0f;
+            slip_exit_time_s_[wheel] = 0.0f;
+        }
+        if (slipping) {
+            slip_wheel_mask_ |= wheel_bit;
+            slip_confidence_[wheel] = std::fmax(0.05f, 1.0f - score);
+        } else {
+            slip_confidence_[wheel] = 1.0f;
+        }
+    }
+
+    slip_detection_valid_ = true;
+}
+
 bool OmniMotionCompensator::update(const Measurement& measurement) {
     if (!configured_ || !std::isfinite(measurement.dt_s) || measurement.dt_s <= 0.0f) {
         return false;
@@ -311,7 +519,7 @@ bool OmniMotionCompensator::update(const Measurement& measurement) {
 
     float measured_vx = 0.0f;
     float measured_vy = 0.0f;
-    const bool wheel_measurement_valid = solveVelocity(
+    bool wheel_measurement_valid = solveVelocity(
         measurement.wheel_linear_velocity_mps,
         measurement.valid_wheel_mask,
         measurement.yaw_rad,
@@ -321,12 +529,18 @@ bool OmniMotionCompensator::update(const Measurement& measurement) {
     const bool acceleration_valid = measurement.acceleration_valid
         && std::isfinite(measurement.acceleration_x_mps2)
         && std::isfinite(measurement.acceleration_y_mps2);
+    const bool yaw_rate_valid = measurement.yaw_rate_valid
+        && std::isfinite(measurement.yaw_rate_rad_s);
 
     if (!wheel_measurement_valid && !acceleration_valid) {
         velocity_measurement_valid_ = false;
         valid_wheel_mask_ = measurement.valid_wheel_mask;
+        resetSlipState();
         return false;
     }
+
+    yaw_rate_rad_s_ = yaw_rate_valid ? measurement.yaw_rate_rad_s : 0.0f;
+    valid_wheel_mask_ = measurement.valid_wheel_mask;
 
     if (!initialized_) {
         resetAxis(
@@ -342,6 +556,9 @@ bool OmniMotionCompensator::update(const Measurement& measurement) {
             config_
         );
         initialized_ = true;
+        predicted_vx_mps_ = vx_axis_.velocity;
+        predicted_vy_mps_ = vy_axis_.velocity;
+        resetSlipState();
     } else {
         predictAxis(&vx_axis_, measurement.dt_s, config_);
         predictAxis(&vy_axis_, measurement.dt_s, config_);
@@ -359,7 +576,55 @@ bool OmniMotionCompensator::update(const Measurement& measurement) {
             );
         }
 
-        if (wheel_measurement_valid) {
+        // 先保存不含轮速校正的 IMU/运动模型预测，再计算逐轮残差。
+        predicted_vx_mps_ = vx_axis_.velocity;
+        predicted_vy_mps_ = vy_axis_.velocity;
+        updateSlipDetection(
+            measurement,
+            predicted_vx_mps_,
+            predicted_vy_mps_
+        );
+
+        if (slip_wheel_mask_ != 0U) {
+            uint8_t reliable_wheel_count = 0U;
+            for (uint8_t wheel = 0U; wheel < kWheelCount; ++wheel) {
+                if ((measurement.valid_wheel_mask
+                        & static_cast<uint8_t>(1U << wheel)) != 0U
+                    && slip_confidence_[wheel] >= 0.5f) {
+                    ++reliable_wheel_count;
+                }
+            }
+
+            float confidence_sum = 0.0f;
+            wheel_measurement_valid =
+                reliable_wheel_count >= 3U
+                && solveVelocityWeighted(
+                    measurement.wheel_linear_velocity_mps,
+                    measurement.valid_wheel_mask,
+                    measurement.yaw_rad,
+                    slip_confidence_,
+                    &measured_vx,
+                    &measured_vy,
+                    &confidence_sum
+                );
+
+            if (wheel_measurement_valid) {
+                const float effective_variance =
+                    config_.wheel_measurement_variance
+                    * (static_cast<float>(reliable_wheel_count)
+                        / std::fmax(confidence_sum, 0.1f));
+                updateVelocity(
+                    &vx_axis_,
+                    measured_vx,
+                    effective_variance
+                );
+                updateVelocity(
+                    &vy_axis_,
+                    measured_vy,
+                    effective_variance
+                );
+            }
+        } else if (wheel_measurement_valid) {
             updateVelocity(
                 &vx_axis_,
                 measured_vx,
@@ -373,9 +638,6 @@ bool OmniMotionCompensator::update(const Measurement& measurement) {
         }
     }
 
-    yaw_rate_rad_s_ = std::isfinite(measurement.yaw_rate_rad_s)
-        ? measurement.yaw_rate_rad_s : 0.0f;
-    valid_wheel_mask_ = measurement.valid_wheel_mask;
     velocity_measurement_valid_ = wheel_measurement_valid;
     return true;
 }
@@ -390,6 +652,16 @@ Estimate OmniMotionCompensator::estimate() const {
     result.initialized = initialized_;
     result.velocity_measurement_valid = velocity_measurement_valid_;
     result.valid_wheel_mask = valid_wheel_mask_;
+    result.predicted_vx_mps = predicted_vx_mps_;
+    result.predicted_vy_mps = predicted_vy_mps_;
+    for (uint8_t wheel = 0U; wheel < kWheelCount; ++wheel) {
+        result.slip_velocity_mps[wheel] = slip_velocity_mps_[wheel];
+        result.slip_score[wheel] = slip_score_[wheel];
+        result.slip_confidence[wheel] = slip_confidence_[wheel];
+    }
+    result.slip_wheel_mask = slip_wheel_mask_;
+    result.slip_detection_valid = slip_detection_valid_;
+    result.slip_detected = slip_wheel_mask_ != 0U;
     return result;
 }
 

@@ -19,6 +19,7 @@
 #include "core_linkage.h"
 
 /* Includes ------------------------------------------------------------------*/
+#include "stdbool.h"
 #include "stdint.h"
 
 /* Exported types ------------------------------------------------------------*/
@@ -38,6 +39,8 @@ typedef struct {
     float angle[3];
     float gyro[3];
     float accel[3];
+    float linear_accel[3];
+    bool accel_valid;
 
     float last_yaw_angle;
     int16_t yaw_round_count;
