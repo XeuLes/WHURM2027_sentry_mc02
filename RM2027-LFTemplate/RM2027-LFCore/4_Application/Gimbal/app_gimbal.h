@@ -10,8 +10,7 @@ LF_EXTERN_C void Gimbal_Task(void const* argument);
 #include <stdint.h>
 namespace gimbal {
 enum class Mode : uint8_t {
-    kZeroForce = 0, kInit, kGap, kManual, kScan, kAutoAim, kFollow, kFault,
-    kPassage = 14 // Wire IDs 8-13 were used by the old passage phases.
+    kZeroForce = 0, kInit, kGap, kManual, kScan, kAutoAim, kFollow, kFault, kPassage
 };
 enum class PassageStage : uint8_t {
     kIdle = 0, kAlign, kFold, kHold, kUnfold, kWait, kFault
@@ -26,7 +25,7 @@ struct DebugState {
     bool ready, following, init_failed;
     uint32_t tx_failures;
     float joint_roll_rad, target_roll_rad;
-    uint8_t passage_hold_mode;
+    uint8_t passage_yaw_centered;
     PassageStage passage_stage;
     bool joint_control;
 };

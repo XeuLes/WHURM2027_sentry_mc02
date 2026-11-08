@@ -56,7 +56,7 @@ struct Axis {
         output = 0;
     }
     bool control(float position, float rate, bool limited, float lo, float hi,
-                 bool circular = false) {
+                 bool circular = false, float feedforward = 0.0f) {
         if (circular) {
             // Use the nearest equivalent angles for both error and target rate.
             position = target + wrap(position - target);
@@ -65,7 +65,7 @@ struct Axis {
         smcPosErrorUpdate(&smc, target, position, rate, kDt);
         smc.error.p_error_integral = clamp(smc.error.p_error_integral,
             -GIMBAL_INTEGRAL_MAX, GIMBAL_INTEGRAL_MAX);
-        float u = smcCalc(&smc);
+        float u = smcCalc(&smc) + feedforward;
         if (!isfinite(u)) { output = 0; return false; }
         if (limited && ((joint <= lo && u < 0) || (joint >= hi && u > 0))) {
             u = 0;
@@ -75,6 +75,11 @@ struct Axis {
         return true;
     }
 };
+
+inline bool jointSettled(const Axis& axis, float goal) {
+    return fabsf(axis.joint - goal) < GIMBAL_PASS_POSITION_TOL_RAD &&
+           fabsf(axis.velocity) < GIMBAL_PASS_SPEED_TOL_RAD_S;
+}
 
 struct DjiAxis : Axis {
     DjiMotor motor;

@@ -22,7 +22,7 @@ struct PassageControl {
     JointTrajectory yaw_path, pitch_path, roll_path;
     float yaw_goal = 0, pitch_goal = GIMBAL_PASS_PITCH_RAD;
     uint32_t stage_start = 0, settled_ms = 0, entry_sequence = 0;
-    bool hold_confirmed = false, rearmed = false;
+    bool center_confirmed = false, rearmed = false;
 } passage;
 bool initialized = false;
 bool calibrated = false, init_failed = false;
@@ -38,6 +38,7 @@ struct ControlCycle {
     float pitch_rate = 0;
     float aim_yaw = 0;
     float aim_pitch = 0;
+    float roll_feedforward_nm = 0;
     bool online = false;
     bool peer_online = false;
     bool rc_online = false;
@@ -46,8 +47,8 @@ struct ControlCycle {
     bool imu_ok = false;
     bool passage_requested = false;
     Mode normal_mode = Mode::kZeroForce;
-    uint8_t hold_ack = 0;
-    uint32_t hold_sequence = 0;
+    bool big_yaw_centered = false;
+    uint32_t chassis_sequence = 0;
     uint8_t sw = 0;
     int16_t rc_pitch = 0;
 };
@@ -71,21 +72,28 @@ void setPassageStage(PassageStage next, uint32_t now) {
     passage.stage = next;
     passage.stage_start = now;
     passage.settled_ms = 0;
-    yaw.reset(yaw.joint);
-    pitch.reset(pitch.joint);
+    if (next == PassageStage::kFold) {
+        // The aligned joints now hold fixed references with zero target velocity.
+        yaw.smc.error.tar_last = passage.yaw_goal;
+        pitch.smc.error.tar_last = passage.pitch_goal;
+    }
     roll.reset(roll.joint);
-    passage.yaw_path.reset(yaw.joint, yaw.velocity);
-    passage.pitch_path.reset(pitch.joint, pitch.velocity);
     passage.roll_path.reset(roll.joint, roll.velocity);
 }
 
 void startPassage(const ControlCycle& cycle, PassageStage first, float yaw_goal, float pitch_goal) {
     passage.yaw_goal = yaw_goal;
     passage.pitch_goal = pitch_goal;
-    passage.entry_sequence = cycle.hold_sequence;
-    passage.hold_confirmed = false;
+    passage.entry_sequence = cycle.chassis_sequence;
+    passage.center_confirmed = false;
     passage.rearmed = false;
     setMode(Mode::kPassage, cycle.yaw, cycle.pitch);
+    yaw.reset(yaw.joint);
+    pitch.reset(pitch.joint);
+    if (first == PassageStage::kAlign) {
+        passage.yaw_path.reset(yaw.joint, yaw.velocity);
+        passage.pitch_path.reset(pitch.joint, pitch.velocity);
+    }
     setPassageStage(first, cycle.now);
 }
 
@@ -104,7 +112,10 @@ void send(const ControlCycle& cycle) {
     if (!ok) {
         ++g_debug.tx_failures;
         yaw.output = pitch.output = roll.output = 0;
-        if (mode == Mode::kPassage) { latchPassageFault(); }
+        if (mode == Mode::kPassage) {
+            latchPassageFault();
+            setMode(Mode::kFault, cycle.yaw, cycle.pitch);
+        }
         // A FIFO failure cannot retract an old frame. Invalidate calibration
         // so subsequent successful frames cannot resume the old reference.
         calibrated = false;
@@ -208,8 +219,8 @@ void observe(ControlCycle& cycle) {
     }
     board_link::ChassisToGimbalPayload remote{};
     board_link::getRemoteChassisData(&remote);
-    cycle.hold_ack = remote.big_yaw_hold_mode;
-    cycle.hold_sequence = remote.sequence;
+    cycle.big_yaw_centered = remote.big_yaw_centered == 1U;
+    cycle.chassis_sequence = remote.sequence;
 
     selectControlRequest(cycle, state.robot_cmd, aux_passage);
 
@@ -228,7 +239,8 @@ void handleException(ControlCycle& cycle) {
         if (cycle.rc_online && cycle.sw == RC_SW_DOWN) {
             init_failed = false;
         }
-        setMode(Mode::kZeroForce, cycle.yaw, cycle.pitch);
+        setMode(passage.stage == PassageStage::kFault ? Mode::kFault : Mode::kZeroForce,
+                cycle.yaw, cycle.pitch);
         yaw.output = pitch.output = roll.output = 0;
         cycle.stop = true;
         return;
@@ -245,13 +257,13 @@ void handleException(ControlCycle& cycle) {
         init_failed = false;
     }
     if (init_failed) {
-        setMode(passage_fault ? Mode::kPassage : Mode::kFault, cycle.yaw, cycle.pitch);
+        setMode(Mode::kFault, cycle.yaw, cycle.pitch);
         yaw.output = pitch.output = roll.output = 0;
         cycle.stop = true;
         return;
     }
     if (passage_fault) {
-        setMode(Mode::kPassage, cycle.yaw, cycle.pitch);
+        setMode(Mode::kFault, cycle.yaw, cycle.pitch);
     }
     cycle.enable = !passage_fault || (passage.rearmed && cycle.passage_requested);
     cycle.stop = !cycle.enable || !motors_ready;
@@ -260,18 +272,15 @@ void handleException(ControlCycle& cycle) {
 void failPassage(const ControlCycle& cycle) {
     latchPassageFault();
     init_failed = true;
-    setMode(Mode::kPassage, cycle.yaw, cycle.pitch);
-}
-
-bool jointSettled(const Axis& axis, float goal) {
-    return fabsf(axis.joint - goal) < GIMBAL_PASS_POSITION_TOL_RAD &&
-           fabsf(axis.velocity) < GIMBAL_PASS_SPEED_TOL_RAD_S;
+    setMode(Mode::kFault, cycle.yaw, cycle.pitch);
 }
 
 void updatePassageStage(const ControlCycle& cycle) {
-    if (!cycle.passage_requested &&
-        (passage.stage == PassageStage::kAlign || passage.stage == PassageStage::kFold ||
-         passage.stage == PassageStage::kHold)) {
+    if (!cycle.passage_requested && passage.stage == PassageStage::kAlign) {
+        // Cancel alignment and hold the current yaw and pitch while returning upright.
+        startPassage(cycle, PassageStage::kUnfold, yaw.joint, pitch.joint);
+    } else if (!cycle.passage_requested &&
+        (passage.stage == PassageStage::kFold || passage.stage == PassageStage::kHold)) {
         // Rebuild the trajectory from actual feedback, not the old fold target.
         setPassageStage(PassageStage::kUnfold, cycle.now);
     }
@@ -284,17 +293,20 @@ void updatePassageStage(const ControlCycle& cycle) {
         return;
     }
 
-    const bool ack = cycle.hold_ack == static_cast<uint8_t>(Mode::kPassage);
-    if (passage.hold_confirmed && !ack) { failPassage(cycle); return; }
-    if (ack && cycle.hold_sequence != passage.entry_sequence) { passage.hold_confirmed = true; }
+    if (passage.center_confirmed && !cycle.big_yaw_centered) { failPassage(cycle); return; }
+    if (cycle.big_yaw_centered && cycle.chassis_sequence != passage.entry_sequence) {
+        passage.center_confirmed = true;
+    }
     if (passage.stage == PassageStage::kHold) { return; }
 
     const float roll_goal = passage.stage == PassageStage::kFold ?
         GIMBAL_PASS_ROLL_RAD : GIMBAL_ROLL_UPRIGHT_RAD;
-    const bool settled = passage.hold_confirmed && jointSettled(yaw, passage.yaw_goal) &&
+    const bool settled = jointSettled(yaw, passage.yaw_goal) &&
         jointSettled(pitch, passage.pitch_goal) && jointSettled(roll, roll_goal);
     passage.settled_ms = settled ? passage.settled_ms + GIMBAL_PERIOD_MS : 0;
-    if (passage.settled_ms >= GIMBAL_PASS_SETTLE_MS) {
+    const uint32_t settle_ms = passage.stage == PassageStage::kAlign ?
+        GIMBAL_PASS_SETTLE_MS : GIMBAL_PASS_ROLL_SETTLE_MS;
+    if (passage.center_confirmed && passage.settled_ms >= settle_ms) {
         switch (passage.stage) {
         case PassageStage::kAlign:
             setPassageStage(PassageStage::kFold, cycle.now);
@@ -339,25 +351,38 @@ void selectMode(ControlCycle& cycle) {
     setMode(cycle.normal_mode, cycle.yaw, cycle.pitch);
 }
 
-void updatePassageReference() {
+void updatePassageReference(ControlCycle& cycle) {
     if (passage.stage == PassageStage::kFault) { return; }
-    yaw.target = passage.yaw_path.advance(passage.yaw_goal,
-        GIMBAL_PASS_JOINT_SPEED_RAD_S, GIMBAL_PASS_JOINT_ACCEL_RAD_S2);
-    pitch.target = passage.pitch_path.advance(passage.pitch_goal,
-        GIMBAL_PASS_JOINT_SPEED_RAD_S, GIMBAL_PASS_JOINT_ACCEL_RAD_S2);
+    yaw.target = passage.yaw_goal;
+    pitch.target = passage.pitch_goal;
+    if (passage.stage == PassageStage::kAlign) {
+        yaw.target = passage.yaw_path.advance(passage.yaw_goal,
+            GIMBAL_PASS_JOINT_SPEED_RAD_S, GIMBAL_PASS_JOINT_ACCEL_RAD_S2);
+        pitch.target = passage.pitch_path.advance(passage.pitch_goal,
+            GIMBAL_PASS_JOINT_SPEED_RAD_S, GIMBAL_PASS_JOINT_ACCEL_RAD_S2);
+    }
     float roll_goal = GIMBAL_ROLL_UPRIGHT_RAD;
     if (passage.stage == PassageStage::kFold || passage.stage == PassageStage::kHold) {
         roll_goal = GIMBAL_PASS_ROLL_RAD;
-    } else if (passage.stage == PassageStage::kUnfold && !passage.hold_confirmed) {
+    } else if (passage.stage == PassageStage::kUnfold && !passage.center_confirmed) {
         roll_goal = passage.roll_path.position;
     }
-    roll.target = passage.roll_path.advance(roll_goal, GIMBAL_ROLL_SPEED_RAD_S,
-                                           GIMBAL_ROLL_ACCEL_RAD_S2);
+    const bool moving_roll = passage.stage == PassageStage::kFold ||
+        (passage.stage == PassageStage::kUnfold && passage.center_confirmed);
+    const float previous_velocity = passage.roll_path.velocity;
+    roll.target = passage.roll_path.advance(roll_goal,
+        moving_roll ? GIMBAL_PASS_ROLL_SPEED_RAD_S : GIMBAL_ROLL_SPEED_RAD_S,
+        moving_roll ? GIMBAL_PASS_ROLL_ACCEL_RAD_S2 : GIMBAL_ROLL_ACCEL_RAD_S2);
+    if (moving_roll) {
+        // Use the trajectory acceleration directly to avoid differentiating across a stage reset.
+        cycle.roll_feedforward_nm = roll.smc.param.J *
+            (passage.roll_path.velocity - previous_velocity) / kDt;
+    }
 }
 
-void updateReference(const ControlCycle& cycle) {
+void updateReference(ControlCycle& cycle) {
     if (cycle.stop) { return; }
-    if (mode == Mode::kPassage) { updatePassageReference(); return; }
+    if (mode == Mode::kPassage) { updatePassageReference(cycle); return; }
     roll.target = GIMBAL_ROLL_UPRIGHT_RAD;
     if (!calibrated) {
         // INIT references are both zero in joint space.
@@ -414,7 +439,7 @@ void calculateOutput(const ControlCycle& cycle) {
     const bool p_valid = pitch.control(pitch_position, pitch_rate, true,
         GIMBAL_PITCH_MIN_RAD, GIMBAL_PITCH_MAX_RAD);
     const bool r_valid = roll.control(roll.joint, roll.velocity, true,
-        GIMBAL_ROLL_MIN_RAD, GIMBAL_ROLL_MAX_RAD);
+        GIMBAL_ROLL_MIN_RAD, GIMBAL_ROLL_MAX_RAD, false, cycle.roll_feedforward_nm);
     if (!y_valid || !p_valid || !r_valid) {
         if (mode == Mode::kPassage) { failPassage(cycle); return; }
         init_failed = true;

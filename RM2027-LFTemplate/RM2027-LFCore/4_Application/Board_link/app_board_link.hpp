@@ -12,7 +12,7 @@
 namespace board_link {
 
 /** Payload 协议版本，两端必须保持一致。 */
-constexpr uint8_t kProtocolVersion = 2U;
+constexpr uint8_t kProtocolVersion = 4U;
 
 /** 周期发送本板状态的间隔，单位毫秒。 */
 constexpr uint32_t kTxPeriodMs = 10U;
@@ -60,8 +60,7 @@ struct __attribute__((packed)) ChassisToGimbalPayload {
     uint32_t buffer_age_ms;
     uint8_t power_received;
     uint8_t buffer_received;
-    // Echo of the requested passage mode once big yaw is holding its heading.
-    uint8_t big_yaw_hold_mode;
+    uint8_t big_yaw_centered; // 1 when centered in passage, 0 otherwise
 
 };
 
@@ -81,7 +80,7 @@ struct __attribute__((packed)) GimbalToChassisPayload {
 
     uint8_t usb_online;
     float small_yaw_offset_rad;
-    // Small gimbal's active mode for automatic aiming and passage hold.
+    // Small gimbal's active mode.
     uint8_t gimbal_mode;
     uint8_t gimbal_cmd; // RobotCmd passage request, 0 or 1
     uint32_t gimbal_cmd_tick_ms; // RobotCmd receipt tick on the gimbal board

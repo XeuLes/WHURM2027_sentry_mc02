@@ -17,6 +17,8 @@ using namespace detail;
 DebugState g_debug{};
 namespace {
 DmAxis yaw;
+JointTrajectory passage_path;
+uint32_t passage_centered_ms = 0;
 bool initialized = false, init_failed = false;
 Mode mode = Mode::kZeroForce;
 
@@ -25,6 +27,7 @@ struct ControlCycle {
     float yaw_position = 0;
     float pitch = 0;
     float yaw_rate = 0;
+    float yaw_feedforward_nm = 0;
     bool imu_ok = false;
     bool motor_ok = false;
     bool peer_online = false;
@@ -40,8 +43,11 @@ struct ControlCycle {
 void setMode(Mode next, float yaw_position) {
     if (mode == next) { return; }
     mode = next;
-    // Passage holds the output-shaft angle relative to the chassis.
-    yaw.reset(next == Mode::kPassage ? yaw.joint : yaw_position);
+    yaw.reset(mode == Mode::kPassage ? yaw.joint : yaw_position);
+    passage_centered_ms = 0;
+    if (mode == Mode::kPassage) {
+        passage_path.reset(yaw.joint, yaw.velocity);
+    }
 }
 
 void send(const ControlCycle& cycle) {
@@ -70,10 +76,20 @@ void publishLocalState(const ControlCycle& cycle) {
                     mode != Mode::kFault && mode != Mode::kZeroForce;
     g_debug.following = mode == Mode::kFollow;
     g_debug.init_failed = init_failed;
-    // One-byte acknowledgement is published only after a successful control/send cycle.
+    bool centered = false;
+    if (g_debug.ready && mode == Mode::kPassage) {
+        if (passage_centered_ms < GIMBAL_PASS_BIG_YAW_SETTLE_MS) {
+            const bool settled = jointSettled(yaw, 0.0f) &&
+                fabsf(passage_path.position) < GIMBAL_PASS_POSITION_TOL_RAD &&
+                fabsf(passage_path.velocity) < GIMBAL_PASS_SPEED_TOL_RAD_S;
+            passage_centered_ms = settled ? passage_centered_ms + GIMBAL_PERIOD_MS : 0;
+        }
+        // Allow small holding corrections, but withdraw the acknowledgement on a large drift.
+        centered = passage_centered_ms >= GIMBAL_PASS_BIG_YAW_SETTLE_MS &&
+            fabsf(yaw.joint) < 2.0f * GIMBAL_PASS_POSITION_TOL_RAD;
+    }
     taskENTER_CRITICAL();
-    g_debug.passage_hold_mode = g_debug.ready && mode == Mode::kPassage ?
-        static_cast<uint8_t>(Mode::kPassage) : 0U;
+    g_debug.passage_yaw_centered = centered ? 1U : 0U;
     taskEXIT_CRITICAL();
 }
 
@@ -145,7 +161,8 @@ Mode selectMode(const ControlCycle& cycle) {
 
 void handleException(ControlCycle& cycle, Mode next) {
     const bool feedback_ok = cycle.motor_ok && (next == Mode::kPassage || cycle.imu_ok);
-    if (next == Mode::kZeroForce || !feedback_ok || !cycle.peer_online) {
+    if (next == Mode::kZeroForce || cycle.small_mode == Mode::kFault ||
+        !feedback_ok || !cycle.peer_online) {
         if (cycle.rc_online && cycle.sw == RC_SW_DOWN) {
             init_failed = false;
         }
@@ -165,8 +182,19 @@ void handleException(ControlCycle& cycle, Mode next) {
     cycle.stop = !yaw.ready;
 }
 
-void updateReference(const ControlCycle& cycle) {
-    if (cycle.stop || mode == Mode::kPassage) { return; }
+void updateReference(ControlCycle& cycle) {
+    if (cycle.stop) { return; }
+    if (mode == Mode::kPassage) {
+        if (passage_centered_ms >= GIMBAL_PASS_BIG_YAW_SETTLE_MS) {
+            yaw.target = 0.0f;
+            return;
+        }
+        const float previous_velocity = passage_path.velocity;
+        yaw.target = passage_path.advance(0.0f, GIMBAL_PASS_BIG_YAW_SPEED_RAD_S,
+                                            GIMBAL_PASS_BIG_YAW_ACCEL_RAD_S2);
+        cycle.yaw_feedforward_nm = yaw.smc.param.J * (passage_path.velocity - previous_velocity) / kDt;
+        return;
+    }
     float rate = 0.0f;
     if (mode == Mode::kManual) {
         rate = -stick(cycle.rc_yaw) * GIMBAL_MANUAL_YAW_RAD_S;
@@ -187,7 +215,7 @@ void calculateOutput(const ControlCycle& cycle) {
     const bool mechanical_hold = mode == Mode::kPassage;
     const float position = mechanical_hold ? yaw.joint : cycle.yaw_position;
     const float rate = mechanical_hold ? yaw.velocity : cycle.yaw_rate;
-    if (!yaw.control(position, rate, false, 0, 0, true)) {
+    if (!yaw.control(position, rate, false, 0, 0, true, cycle.yaw_feedforward_nm)) {
         init_failed = true;
         setMode(Mode::kFault, cycle.yaw_position);
     }

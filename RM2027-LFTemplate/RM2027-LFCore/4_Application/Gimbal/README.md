@@ -156,35 +156,37 @@ RobotCmd 继续使用 ID `0x01` 和现有的 `uint32_t time_stamp`。新版在�
 ## 过洞模式（小 yaw → roll → pitch）
 
 云台进入 `Mode::kPassage` 后，由云台板的 `PassageStage` 状态机控制小 yaw、roll、pitch。
-大 yaw 进入时记录 DM4310 输出轴的机械角，过洞期间使用该角度和电机相对角速度闭环，
-使大 yaw 与底盘的相对角度保持固定。退出后以当前 IMU 朝向建立普通模式的参考。
+正常过洞时，大 yaw 与小 yaw、pitch 同时对齐。大 yaw 限速回到
+`GIMBAL_BIG_YAW_MID_RAD` 对应的机械中位，实测到位后发确认。退出后以当前 IMU 朝向建立普通模式的参考。
 右拨杆在中档时，ET08A 第 5 通道（`rc.s[2]`）的辅助开关控制过洞。
 上档等效于过洞请求 `1`，中档或下档等效于 `0`。辅助开关由
 `GIMBAL_PASS_SWITCH_INDEX/POSITION` 配置。右拨杆上档或遥控离线时，
 从 USB 获取过洞请求及自瞄目标。过洞过程中也按当前控制档选择有效请求。
 SB（第 7 通道、`rc.s[0]`）下档仍为总锁定；SC（第 8 通道、`rc.s[1]`）继续选择底盘模式。
-板间协议已经转发四个开关槽位，此调整不改变报文布局。
+板间协议转发四个开关槽位。
 
 | 阶段 | 云台板 | 大 yaw |
 | --- | --- | --- |
-| Align | 小 yaw 回中，pitch 到停放角，roll 保持直立。等待关节到位和大 yaw 确认 | 捕获进入时机械角并保持 |
-| Fold | roll 限速侧翻 | 保持 |
+| Align | 小 yaw、pitch 沿轨迹到停放角，roll 保持直立。等待本地关节到位和大 yaw 确认 | 沿轨迹回中并确认 |
+| Fold | roll 限速侧翻，小 yaw、pitch 闭环守住固定停放角 | 保持中位 |
 | Hold | 三个关节保持，等待退出请求 | 保持 |
 | Unfold | roll 从实际位置回正，小 yaw/pitch 保持原目标 | 保持 |
 | Wait | 回正后等请求撤销且 IMU 可用，再按当前控制档恢复手动、扫描或自瞄 | 保持 |
-| Fault | 锁定故障，停止输出 | 大 yaw 条件正常时保持原机械角 |
+| Fault | 锁定故障，停止输出 | 停止输出 |
 
 进入普通模式时按当前角度重建参考。
 过洞期间各轴使用机械角及电机相对速度。
 调试对象 `gimbal::g_debug.passage_stage` 显示过洞阶段，
 `joint_roll_rad/target_roll_rad/roll_torque_nm` 用于观察 roll。
 
-云台通过原 `gimbal_mode` 报告 `kPassage`，大 yaw 使用原 `big_yaw_hold_mode` 确认保持。
-确认必须来自进入过洞后新收到的报文。两板需同时支持新的过洞模式值。
+大 yaw 收到 `gimbal_mode = kPassage` 后回中，并在云台退出过洞前保持中位。
+实测到位并稳定后，底盘回传 `big_yaw_centered = 1`，其余情况回传 0。
+云台使用进入该流程后收到的新报文确认大 yaw 到位。
+板间协议版本为 4，两板需同时更新固件。
 对齐、放倒或回正超过 `GIMBAL_PASS_PHASE_TIMEOUT_MS` 后进入 Fault。
 断联、锁定、电机/CAN 故障会打断流程，不能自动回普通初始化。
 过洞故障后，等反馈和控制条件恢复，再将当前过洞请求先撤销、后重新发出以尝试回正。
-恢复时保留小 yaw/pitch 的实际机械位置，回正后进入 Wait。
+恢复时保留小 yaw/pitch 的实际机械位置，等待大 yaw 回中确认后再回正 roll，随后进入 Wait。
 开机检测到 roll 已明显侧翻时也不会直接自动立起，需按上述显式恢复流程处理。
 
 过洞默认 pitch 为机械 0、roll 为单侧 +π/2；方向、限位、速度/加速度、位置/速度容差及稳定时间

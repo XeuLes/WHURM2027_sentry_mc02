@@ -136,7 +136,7 @@ void sendChassisData(uint32_t now_ms) {
     payload.buffer_received = power.buffer_received ? 1U : 0U;
 #if BOARD_ROLE == 1
     taskENTER_CRITICAL();
-    payload.big_yaw_hold_mode = gimbal::g_debug.passage_hold_mode;
+    payload.big_yaw_centered = gimbal::g_debug.passage_yaw_centered;
     taskEXIT_CRITICAL();
 #endif
 
