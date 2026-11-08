@@ -17,6 +17,7 @@
 
 #include "usb.hpp"
 
+#include <math.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -30,7 +31,6 @@
 #include "referee.hpp"
 #include "lf_core.hpp"
 
-#include "gimbal_config.h"
 
 #define USB_LINK_TIMEOUT_MS 100  // ms
 #define USB_CONNECT_CNT 10
@@ -340,19 +340,28 @@ void Usb::Receive(void)
             if (crc16_ok) {
                 switch (data_id) {
                     case ROBOT_CMD_DATA_RECEIVE_ID: {
-                        if ((4U + data_len + 2U) == sizeof(ReceiveDataRobotCmd_s)) {
-                            uint32_t command_timestamp;
-                            memcpy(&command_timestamp, &sof_address[4], sizeof(command_timestamp));
-                            // The receive buffer can be parsed again on subsequent polls.
-                            // Host timestamps must advance; equal target VALUES are allowed.
-                            if (!has_robot_cmd_timestamp ||
-                                static_cast<int32_t>(command_timestamp - latest_robot_cmd_timestamp) > 0) {
-                                latest_robot_cmd_timestamp = command_timestamp;
-                                has_robot_cmd_timestamp = true;
-                                memcpy(&receive_robot_cmd, sof_address, sizeof(ReceiveDataRobotCmd_s));
-                                UpdateRobotCmd();
-                            }
+                        const auto frame_size = HEADER_SIZE + data_len + sizeof(uint16_t);
+                        const bool legacy = frame_size ==
+                            sizeof(receive_robot_cmd) - sizeof(receive_robot_cmd.gimbal_cmd);
+                        if (!legacy && frame_size != sizeof(receive_robot_cmd)) { break; }
+
+                        uint32_t command_timestamp;
+                        memcpy(&command_timestamp, &sof_address[4], sizeof(command_timestamp));
+                        if (has_robot_cmd_timestamp &&
+                            static_cast<int32_t>(command_timestamp - latest_robot_cmd_timestamp) <= 0) {
+                            break;
                         }
+
+                        memcpy(&receive_robot_cmd, sof_address, frame_size - sizeof(uint16_t));
+                        if (legacy) {
+                            receive_robot_cmd.gimbal_cmd = 0U;
+                        } else if (receive_robot_cmd.gimbal_cmd > 1U) {
+                            break;
+                        }
+                        latest_robot_cmd_timestamp = command_timestamp;
+                        has_robot_cmd_timestamp = true;
+                        UpdateRobotCmd();
+                        receive_time = robot_cmd_receive_time;
                     } break;
                     case PID_DEBUG_DATA_RECEIVE_ID: {
                         memcpy(&receive_pid_debug, sof_address, sizeof(ReceiveDataPidDebug_s));
@@ -611,7 +620,7 @@ void Usb::SendRobotStatus(void)
  */
 void Usb::SendJointState(void)
 {
-#if GIMBAL_CONTROL_ENABLED && GIMBAL_SMALL_ENABLE
+#if BOARD_ROLE == 2
     const auto state = LuojiaFox::system_state.read().gimbal;
     const uint32_t now = HAL_GetTick();
     if (!state.online ||
@@ -691,6 +700,8 @@ void Usb::SendInitSpeed(void)
 void Usb::UpdateRobotCmd(void)
 {
     LuojiaFox::RobotCmdState cmd {};
+    const auto state = LuojiaFox::system_state.read();
+    robot_cmd_receive_time = HAL_GetTick();
 
     robot_cmd.speed_vector.vx = receive_robot_cmd.data.speed_vector.vx;
     robot_cmd.speed_vector.vy = receive_robot_cmd.data.speed_vector.vy;
@@ -701,8 +712,19 @@ void Usb::UpdateRobotCmd(void)
     robot_cmd.chassis.roll = receive_robot_cmd.data.chassis.roll;
     robot_cmd.chassis.leg_length = receive_robot_cmd.data.chassis.leg_lenth;
 
-    robot_cmd.gimbal.yaw = receive_robot_cmd.data.gimbal.yaw;
-    robot_cmd.gimbal.pitch = receive_robot_cmd.data.gimbal.pitch;
+    const float yaw_target = receive_robot_cmd.data.gimbal.yaw;
+    const float pitch_target = receive_robot_cmd.data.gimbal.pitch;
+    const bool aim_finite = isfinite(yaw_target) && isfinite(pitch_target);
+    cmd.passage_requested = receive_robot_cmd.gimbal_cmd == 1U;
+    if (aim_finite) {
+        // Aim activity follows changes in the received target.
+        const bool changed = yaw_target != robot_cmd.gimbal.yaw ||
+                             pitch_target != robot_cmd.gimbal.pitch;
+        cmd.gimbal_aim_changed_ms = changed ? robot_cmd_receive_time :
+                                             state.robot_cmd.gimbal_aim_changed_ms;
+    }
+    robot_cmd.gimbal.yaw = yaw_target;
+    robot_cmd.gimbal.pitch = pitch_target;
 
     robot_cmd.shoot.fire = receive_robot_cmd.data.shoot.fire;
     robot_cmd.shoot.fric_on = receive_robot_cmd.data.shoot.fric_on;
@@ -716,8 +738,9 @@ void Usb::UpdateRobotCmd(void)
     cmd.chassis_yaw = robot_cmd.chassis.yaw;
     cmd.chassis_leg_length = robot_cmd.chassis.leg_length;
 
-    cmd.gimbal_pitch = robot_cmd.gimbal.pitch;
-    cmd.gimbal_yaw = robot_cmd.gimbal.yaw;
+    // SENTRY RobotCmd carries absolute targets in the gimbal IMU frame.
+    cmd.gimbal_yaw = yaw_target;
+    cmd.gimbal_pitch = pitch_target;
 
     cmd.fire = robot_cmd.shoot.fire;
     cmd.fric_on = robot_cmd.shoot.fric_on;

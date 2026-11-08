@@ -442,6 +442,7 @@ typedef struct RobotCmdData
             uint8_t fric_on;
         } __packed__ shoot;
     } __packed__ data;
+    uint8_t gimbal_cmd;  // 可选尾字段，0 普通，1 过洞
     uint16_t checksum;
 } __packed__ ReceiveDataRobotCmd_s;
 

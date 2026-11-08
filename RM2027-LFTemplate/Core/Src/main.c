@@ -34,9 +34,8 @@
 #include "dvc_bsp.h"
 #if BOARD_ROLE == 1
 #include "app_chassis.h"
-#include "app_gimbal.h"
-
 #endif
+#include "app_gimbal.h"
 #include "remote_control.h"
 /* USER CODE END Includes */
 
@@ -142,20 +141,17 @@ int main(void)
   /* USER CODE BEGIN 2 */
   bspInit();
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
-#if BOARD_ROLE == 2
   remoteControlInit();
-#endif
 
   /* 启动三路 FDCAN；底盘/云台/发射模块随后自行注册电机 */
   bspFdcanInit();
 
 #if BOARD_ROLE == 1
   Chassis_Init();
-#if GIMBAL_CONTROL_ENABLED
-  if (!Gimbal_Init()) {
-    Error_Handler();
-  }
 #endif
+  if (!Gimbal_Init()) {
+      Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Call init function for freertos objects (in cmsis_os2.c) */

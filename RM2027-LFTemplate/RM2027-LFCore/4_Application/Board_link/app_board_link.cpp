@@ -134,7 +134,7 @@ void sendChassisData(uint32_t now_ms) {
     payload.buffer_age_ms = power.buffer_received ? now_ms - power.buffer_tick : 0U;
     payload.power_received = power.power_received ? 1U : 0U;
     payload.buffer_received = power.buffer_received ? 1U : 0U;
-#if GIMBAL_CONTROL_ENABLED && GIMBAL_BIG_YAW_ENABLE
+#if BOARD_ROLE == 1
     taskENTER_CRITICAL();
     payload.big_yaw_hold_mode = gimbal::g_debug.passage_hold_mode;
     taskEXIT_CRITICAL();
@@ -179,6 +179,8 @@ void sendGimbalData(uint32_t now_ms) {
     payload.usb_online = usb_online ? 1U : 0U;
     payload.small_yaw_offset_rad = state.gimbal.joint_yaw_rad;
     payload.gimbal_mode = state.gimbal.mode;
+    payload.gimbal_cmd = static_cast<uint8_t>(state.robot_cmd.passage_requested);
+    payload.gimbal_cmd_tick_ms = state.robot_cmd.last_update_ms;
 
 
     taskENTER_CRITICAL();

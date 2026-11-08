@@ -48,11 +48,9 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
 osThreadId userTaskHandle;
-#if GIMBAL_CONTROL_ENABLED
 static uint32_t Gimbal_TaskBuffer[1024];
 static osStaticThreadDef_t Gimbal_TaskControlBlock;
 osThreadId gimbal_task_handle;
-#endif
 osThreadId insTaskHandle;
 uint32_t BoardLink_TaskBuffer[512];
 osStaticThreadDef_t BoardLink_TaskControlBlock;
@@ -170,7 +168,7 @@ void MX_FREERTOS_Init(void) {
   Start_Shoot_TaskHandle = osThreadCreate(osThread(Start_Shoot_Task), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
-#if GIMBAL_CONTROL_ENABLED
+#if !defined(TUNING_BENCH) || !TUNING_BENCH
   osThreadStaticDef(GIMBAL, Gimbal_Task, osPriorityAboveNormal, 0, 1024,
                    Gimbal_TaskBuffer, &Gimbal_TaskControlBlock);
   gimbal_task_handle = osThreadCreate(osThread(GIMBAL), NULL);

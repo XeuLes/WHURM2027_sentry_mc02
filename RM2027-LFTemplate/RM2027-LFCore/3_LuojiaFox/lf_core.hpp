@@ -87,6 +87,8 @@ struct RobotCmdState
     uint8_t fire;
     uint8_t fric_on;
     uint32_t last_update_ms;
+    bool passage_requested = false;
+    uint32_t gimbal_aim_changed_ms = 0U;
 };
 
 struct UsbLinkState

@@ -28,8 +28,7 @@ void SystemStateStore::updateImu(const ImuState &state)
 {
     taskENTER_CRITICAL();
     g_system_state.imu = state;
-    g_system_state.imu.updated_at_ms = HAL_GetTick();
-    g_system_state.imu.valid = true;
+    g_system_state.imu.last_update_ms = HAL_GetTick();
     taskEXIT_CRITICAL();
 }
 
@@ -67,8 +66,9 @@ void SystemStateStore::updateRobotCmd(const RobotCmdState &state)
 {
     taskENTER_CRITICAL();
     g_system_state.robot_cmd = state;
-    g_system_state.robot_cmd.updated_at_ms = HAL_GetTick();
-    g_system_state.robot_cmd.valid = true;
+    // USB publishes only newly accepted RobotCmd frames; board-link publishes
+    // received commands. Keep the local receipt time used by the gimbal.
+    g_system_state.robot_cmd.last_update_ms = HAL_GetTick();
     taskEXIT_CRITICAL();
 }
 
