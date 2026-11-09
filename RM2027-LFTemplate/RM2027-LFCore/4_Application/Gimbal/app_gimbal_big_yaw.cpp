@@ -19,6 +19,7 @@ namespace {
 DmAxis yaw;
 JointTrajectory passage_path;
 uint32_t passage_centered_ms = 0;
+bool passage_yaw_centered = false;
 bool initialized = false, init_failed = false;
 Mode mode = Mode::kZeroForce;
 
@@ -60,9 +61,7 @@ void send(const ControlCycle& cycle) {
     }
 }
 
-void publishLocalState(const ControlCycle& cycle) {
-    // This is the heavy big-yaw actuator's local state. GimbalState describes
-    // the aiming small-yaw/pitch assembly, so do not publish big yaw there.
+void publishDebug(const ControlCycle& cycle) {
     g_debug.mode = mode;
     g_debug.yaw_rad = cycle.yaw_position;
     g_debug.pitch_rad = cycle.pitch;
@@ -76,8 +75,13 @@ void publishLocalState(const ControlCycle& cycle) {
                     mode != Mode::kFault && mode != Mode::kZeroForce;
     g_debug.following = mode == Mode::kFollow;
     g_debug.init_failed = init_failed;
+    g_debug.passage_yaw_centered = passage_yaw_centered ? 1U : 0U;
+
+}
+
+void updatePassageCentered(const ControlCycle& cycle) {
     bool centered = false;
-    if (g_debug.ready && mode == Mode::kPassage) {
+    if (!cycle.stop && !init_failed && mode == Mode::kPassage) {
         if (passage_centered_ms < GIMBAL_PASS_BIG_YAW_SETTLE_MS) {
             const bool settled = jointSettled(yaw, 0.0f) &&
                 fabsf(passage_path.position) < GIMBAL_PASS_POSITION_TOL_RAD &&
@@ -89,7 +93,7 @@ void publishLocalState(const ControlCycle& cycle) {
             fabsf(yaw.joint) < 2.0f * GIMBAL_PASS_POSITION_TOL_RAD;
     }
     taskENTER_CRITICAL();
-    g_debug.passage_yaw_centered = centered ? 1U : 0U;
+    passage_yaw_centered = centered;
     taskEXIT_CRITICAL();
 }
 
@@ -221,6 +225,13 @@ void calculateOutput(const ControlCycle& cycle) {
     }
 }
 } // namespace
+
+bool bigYawCentered() {
+    taskENTER_CRITICAL();
+    const bool centered = passage_yaw_centered;
+    taskEXIT_CRITICAL();
+    return centered;
+}
 } // namespace gimbal
 
 extern "C" bool Gimbal_Init(void) {
@@ -244,7 +255,8 @@ extern "C" void Gimbal_Control(void) {
     updateReference(cycle);
     calculateOutput(cycle);
     send(cycle);
-    publishLocalState(cycle);
+    updatePassageCentered(cycle);
+    publishDebug(cycle);
 }
 
 extern "C" void Gimbal_Task(void const* argument) {

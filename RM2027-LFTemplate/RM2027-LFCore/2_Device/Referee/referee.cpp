@@ -284,7 +284,9 @@ RefereePowerSnapshot Referee::GetPowerSupplySnapshot()
     __DMB();
     const RefereePowerSnapshot result = {
         robot_status.chassis_power_limit, power_heat_data.buffer_energy,
-        power_tick_, buffer_tick_, power_received_, buffer_received_, !IsOffline()
+        power_tick_, buffer_tick_, power_received_, buffer_received_, !IsOffline(),
+        robot_status.shooter_barrel_cooling_value, robot_status.shooter_barrel_heat_limit,
+        power_heat_data.shooter_17mm_barrel_heat
     };
     __DMB();
     __set_PRIMASK(mask);

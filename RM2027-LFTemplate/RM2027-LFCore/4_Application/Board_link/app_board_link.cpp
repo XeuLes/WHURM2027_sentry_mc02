@@ -134,11 +134,10 @@ void sendChassisData(uint32_t now_ms) {
     payload.buffer_age_ms = power.buffer_received ? now_ms - power.buffer_tick : 0U;
     payload.power_received = power.power_received ? 1U : 0U;
     payload.buffer_received = power.buffer_received ? 1U : 0U;
-#if BOARD_ROLE == 1
-    taskENTER_CRITICAL();
-    payload.big_yaw_centered = gimbal::g_debug.passage_yaw_centered;
-    taskEXIT_CRITICAL();
-#endif
+    payload.big_yaw_centered = gimbal::bigYawCentered() ? 1U : 0U;
+    payload.shooter_cooling_value = power.shooter_cooling_value;
+    payload.shooter_heat_limit = power.shooter_heat_limit;
+    payload.shooter_17mm_heat = power.shooter_17mm_heat;
 
 
     taskENTER_CRITICAL();

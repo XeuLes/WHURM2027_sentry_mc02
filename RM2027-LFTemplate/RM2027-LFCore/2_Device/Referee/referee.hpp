@@ -30,6 +30,9 @@ struct RefereePowerSnapshot {
     bool power_received;
     bool buffer_received;
     bool online;
+    uint16_t shooter_cooling_value;
+    uint16_t shooter_heat_limit;
+    uint16_t shooter_17mm_heat;
 };
 
 #define USART_RX_BUF_LENGHT 512

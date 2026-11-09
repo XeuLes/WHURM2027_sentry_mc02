@@ -62,6 +62,10 @@ struct __attribute__((packed)) ChassisToGimbalPayload {
     uint8_t buffer_received;
     uint8_t big_yaw_centered; // 1 when centered in passage, 0 otherwise
 
+    // 枪口热量字段。新鲜度分别沿用 0x0201 的 power_age_ms 和 0x0202 的 buffer_age_ms。
+    uint16_t shooter_cooling_value;
+    uint16_t shooter_heat_limit;
+    uint16_t shooter_17mm_heat;
 };
 
 /**
