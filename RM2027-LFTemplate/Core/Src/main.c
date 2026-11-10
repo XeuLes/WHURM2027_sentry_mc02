@@ -31,6 +31,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "bsp_can.h"
+#include "dm_imu.hpp"
 #include "dvc_bsp.h"
 #if BOARD_ROLE == 1
 #include "app_chassis.h"
@@ -145,6 +146,10 @@ int main(void)
 
   /* 启动三路 FDCAN；底盘/云台/发射模块随后自行注册电机 */
   bspFdcanInit();
+  /* DM-IMU 在设备侧配置主动上报。 */
+  if (!dm_imu_init(0x01U, 0x11U, &hfdcan3)) {
+      Error_Handler();
+  }
 
 #if BOARD_ROLE == 1
   Chassis_Init();
