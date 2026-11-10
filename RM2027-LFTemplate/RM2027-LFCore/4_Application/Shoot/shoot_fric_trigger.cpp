@@ -5,11 +5,11 @@
 #if BOARD_ROLE == 2 
 
 #include "alg_basic.hpp"
+#include "alg_smc.hpp"
 #include "app_board_link.hpp"
 #include "app_gimbal.h"
 #include "dvc_dji_motor.hpp"
 #include "lf_core.hpp"
-#include "m2006_speed_smc.hpp"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -23,8 +23,8 @@ constexpr size_t kFricCount = sizeof(kFricIds) / sizeof(kFricIds[0]);
 constexpr uint32_t kTxIdentifier = 0x200U;
 constexpr float kTwoPi = 6.28318530718f;
 constexpr float kAnglePerBullet = kTwoPi / kBulletNum;
-constexpr auto kFricSmc = m2006_speed_smc::outputProfile(kFricReduction);
-constexpr auto kTriggerSmc = m2006_speed_smc::outputProfile(kTriggerReduction);
+constexpr float kFricSmcParams[] = SHOOT_FRIC_SMC_PARAMS;
+constexpr float kTriggerSmcParams[] = SHOOT_TRIGGER_SMC_PARAMS;
 
 enum LoadMode { LOAD_STOP, LOAD_BULLET, LOAD_NO_LIMIT, LOAD_BURSTFIRE, LOAD_BLOCK };
 enum FricState { FRIC_NOT_READY, FRIC_ON, FRIC_READY };
@@ -73,10 +73,9 @@ struct ShootState {
 
 ShootState SHOOT;
 
-void InitSpeedLoop(SpeedLoop& loop, const m2006_speed_smc::Profile& profile)
+void InitSpeedLoop(SpeedLoop& loop, const float (&params)[9])
 {
-    smcInit(&loop.smc, profile.gains, VELSMC, m2006_speed_smc::kSaturationLimit,
-            DJI_M2006_MAX_COMMAND, 0.0f);
+    smcInit(&loop.smc, params, VELSMC, kSmcSatLimit, DJI_M2006_MAX_COMMAND, 0.0f);
 }
 
 void ResetSpeedLoop(SpeedLoop& loop)
@@ -100,9 +99,9 @@ bool ShootInit()
             return false;
         }
     }
-    InitSpeedLoop(SHOOT.trigger_loop, kTriggerSmc);
+    InitSpeedLoop(SHOOT.trigger_loop, kTriggerSmcParams);
     for (SpeedLoop& loop : SHOOT.fric_loop) {
-        InitSpeedLoop(loop, kFricSmc);
+        InitSpeedLoop(loop, kFricSmcParams);
     }
 
     // 四个电机独占同一组发送帧。先检查整组，避免注册到一半发生冲突。
@@ -156,16 +155,16 @@ void ShootObserver()
 {
     const auto system = LuojiaFox::system_state.read();
     board_link::ChassisToGimbalPayload remote{};
-    uint32_t received_ms = 0U;
-    const bool have_remote = board_link::getRemoteChassisData(&remote, &received_ms);
     uint32_t now;
+    bool peer_online;
     bool rc_online;
     char sw;
     {
         MotorCriticalSection lock;
         now = HAL_GetTick();
+        peer_online = board_link::getRemoteChassisData(&remote) && board_link::isPeerOnline(now);
         rc_online = !getRcOffline();
-        sw = getDt7RcSw(kModeChannel);
+        sw = getDt7RcSw(SHOOT_MODE_CHANNEL);
         SHOOT.stop_requested = rc_online &&
             (SWITCH_IS_DOWN(getDt7RcSw(RC_SW_RIGHT)) || (!SWITCH_IS_UP(sw) && !SWITCH_IS_MID(sw)));
 
@@ -199,12 +198,10 @@ void ShootObserver()
     }
     SHOOT.sentry_fric_cmd = SHOOT.aim_lost_time < kAimLostMs;
 
-    const uint32_t link_age = now - received_ms;
-    SHOOT.heat_fresh = have_remote &&
-        link_age < board_cfg::kConfig.link_timeout_ms && link_age < kRefereeTimeoutMs &&
+    SHOOT.heat_fresh = peer_online &&
         remote.referee_online && remote.power_received && remote.buffer_received &&
-        remote.power_age_ms < kRefereeTimeoutMs - link_age &&
-        remote.buffer_age_ms < kRefereeTimeoutMs - link_age && remote.shooter_heat_limit != 0U;
+        remote.power_age_ms < kRefereeTimeoutMs &&
+        remote.buffer_age_ms < kRefereeTimeoutMs && remote.shooter_heat_limit != 0U;
     SHOOT.cooling_value = remote.shooter_cooling_value;
     SHOOT.heat_limit = remote.shooter_heat_limit;
     SHOOT.heat = remote.shooter_17mm_heat;
@@ -300,7 +297,7 @@ float SingleShotSpeed()
     const float error = SHOOT.ref.trigger_angle - SHOOT.fdb.trigger_angle;
     const float remaining = fmaxf(fabsf(error) - kSingleAngleToleranceRad, 0.0f);
     // 按剩余制动距离生成单发速度参考，速度闭环仍使用同一个 VELSMC。
-    const float braking_speed = sqrtf(2.0f * kTriggerSmc.slew_rad_s2 * remaining);
+    const float braking_speed = sqrtf(2.0f * kTriggerSlewRadS2 * remaining);
     return copysignf(fminf(braking_speed, -kTriggerSpeedRadS), error);
 }
 
@@ -371,10 +368,10 @@ void ShootConsole()
     }
     for (size_t i = 0; i < kFricCount; ++i) {
         SHOOT.fric_motor[i].setCommand(SpeedCommand(
-            SHOOT.fric_loop[i], SHOOT.fdb.fric_speed[i], SHOOT.ref.fric_speed[i], kFricSmc.slew_rad_s2));
+            SHOOT.fric_loop[i], SHOOT.fdb.fric_speed[i], SHOOT.ref.fric_speed[i], kFricSlewRadS2));
     }
     SHOOT.trigger_motor.setCommand(SpeedCommand(
-        SHOOT.trigger_loop, SHOOT.fdb.trigger_speed, SHOOT.ref.trigger_speed, kTriggerSmc.slew_rad_s2));
+        SHOOT.trigger_loop, SHOOT.fdb.trigger_speed, SHOOT.ref.trigger_speed, kTriggerSlewRadS2));
 }
 
 void ShootSendCmd()

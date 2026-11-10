@@ -168,19 +168,13 @@ void MX_FREERTOS_Init(void) {
   Start_Shoot_TaskHandle = osThreadCreate(osThread(Start_Shoot_Task), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
-#if !defined(TUNING_BENCH) || !TUNING_BENCH
-  osThreadStaticDef(GIMBAL, Gimbal_Task, osPriorityAboveNormal, 0, 1024,
-                   Gimbal_TaskBuffer, &Gimbal_TaskControlBlock);
-  gimbal_task_handle = osThreadCreate(osThread(GIMBAL), NULL);
-  if (gimbal_task_handle == NULL) {
-    Error_Handler();
-  }
-#endif
+  osThreadStaticDef(Start_Gimbal_Task, Gimbal_Task, osPriorityAboveNormal, 0, 1024, Gimbal_TaskBuffer, &Gimbal_TaskControlBlock);
+  gimbal_task_handle = osThreadCreate(osThread(Start_Gimbal_Task), NULL);
+  
 #if BOARD_ROLE == 1
   /* 超电与裁判系统均在底盘板；0x52 反馈设备初始化成功后创建任务。 */
   if (supercapInit()) {
-    osThreadStaticDef(SUPERPOWER, superpower_task, osPriorityAboveNormal, 0, 256,
-                      SUPERPOWER_TaskBuffer, &SUPERPOWER_TaskControlBlock);
+    osThreadStaticDef(SUPERPOWER, superpower_task, osPriorityAboveNormal, 0, 256, ERPOWER_TaskBuffer, &SUPERPOWER_TaskControlBlock);
     superpower_handle = osThreadCreate(osThread(SUPERPOWER), NULL);
     if (superpower_handle == NULL) {
       Error_Handler();

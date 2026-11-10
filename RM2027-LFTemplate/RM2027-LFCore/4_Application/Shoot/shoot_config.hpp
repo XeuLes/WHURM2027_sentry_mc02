@@ -43,7 +43,7 @@ constexpr uint32_t kReverseTimeMs = 1250U;
 
 // 速度均为机构正方向的 rad/s。摩擦轮物理转向由上面的电机方向配置。
 constexpr float kFricSpeedRadS[] = {1000.0f, 1000.0f, 1000.0f};
-constexpr float kFricSpeedLimitRadS = 1400.0f;
+constexpr float kFricSpeedLimitRadS = 800.0f;
 constexpr float kFricSpeedErrorRadS = 20.0f;
 // 参考代码的拨弹盘速度环使用转子速度。现用 P36 输出轴反馈。
 constexpr float kBlockTriggerSpeedRadS = 5.0f / kTriggerReduction;
@@ -51,4 +51,20 @@ constexpr float kReverseSpeedRadS = 20.0f / kTriggerReduction;
 constexpr float kTriggerSpeedRadS = -350.0f / kTriggerReduction;
 constexpr float kSingleAngleToleranceRad = 0.01f;
 
+// 实测参数按转子 rpm 标定，按各自减速比换算到输出轴 rad/s。
+constexpr float kRotorRpmPerRadS = 9.549296586f;
+constexpr float kFricRpmPerRadS = kFricReduction * kRotorRpmPerRadS;
+constexpr float kTriggerRpmPerRadS = kTriggerReduction * kRotorRpmPerRadS;
+constexpr float kFricSlewRadS2 = 80000.0f / kFricRpmPerRadS;
+constexpr float kTriggerSlewRadS2 = 80000.0f / kTriggerRpmPerRadS;
+constexpr float kSmcSatLimit = 1.0f;
+
 } // namespace shoot_config
+
+// 参数顺序：J, K, c, c1, c2, p, q, beta, epsilon。
+#define SHOOT_FRIC_SMC_PARAMS \
+    {0.05f * shoot_config::kFricRpmPerRadS, 100.0f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, \
+     0.1f / shoot_config::kFricRpmPerRadS}
+#define SHOOT_TRIGGER_SMC_PARAMS \
+    {0.05f * shoot_config::kTriggerRpmPerRadS, 100.0f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, \
+     0.1f / shoot_config::kTriggerRpmPerRadS}
