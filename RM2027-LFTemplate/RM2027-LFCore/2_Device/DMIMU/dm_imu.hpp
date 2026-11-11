@@ -91,6 +91,8 @@ typedef struct
 	// 与设备上报位图一致：bit0 四元数，bit1 欧拉角，bit2 角速度，bit3 加速度和温度。
 	uint8_t received_mask;
 	uint32_t last_rx_ms; // 最近一帧有效测量的主控时间
+	uint32_t euler_rx_ms;
+	uint32_t gyro_rx_ms;
 
 }imu_t;
 
@@ -117,6 +119,8 @@ LF_EXTERN_C bool imu_restore_settings(void);
 LF_EXTERN_C bool imu_request_accel(void);
 LF_EXTERN_C bool imu_request_gyro(void);
 LF_EXTERN_C bool imu_request_euler(void);
+// 保留按需四元数请求/解析接口。当前 CAN3 周期预算不包含四元数主动上报，
+// 正常控制任务不调用此请求；设备端也须关闭 QUAT 的主动输出。
 LF_EXTERN_C bool imu_request_quat(void);
 
 #endif

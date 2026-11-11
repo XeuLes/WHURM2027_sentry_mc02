@@ -23,6 +23,7 @@
 
 #include "CRC8_CRC16.h"
 #include "cmsis_os.h"
+#include "gimbal_config.h"
 //#include "macro_typedef.h"  遥控器宏定义
 #include "usb_device.h"
 #include "usb_typdef.h"
@@ -30,6 +31,7 @@
 #include "usbd_conf.h"
 #include "referee.hpp"
 #include "lf_core.hpp"
+#include "board_link_can.hpp"
 
 
 #define USB_LINK_TIMEOUT_MS 100  // ms
@@ -44,7 +46,7 @@
 #define SEND_DURATION_Pid         10  // ms
 #define SEND_DURATION_AllRobotHp  10  // ms
 #define SEND_DURATION_GameStatus  10  // ms
-#define SEND_DURATION_RobotMotion 10  // ms
+#define SEND_DURATION_RobotMotion 10 // ms，匹配 CAN3 底盘实测反馈
 #define SEND_DURATION_GroundRobotPosition   10// ms
 #define SEND_DURATION_RfidStatus   10// ms
 #define SEND_DURATION_RobotStatus  10// ms
@@ -187,15 +189,13 @@ void Usb::Init(void)
     append_CRC8_check_sum(  // 添加帧头 CRC8 校验位
         (uint8_t *)(&send_game_status.frame_header),
         sizeof(send_game_status.frame_header));
-    
-    // 8.初始化机器人运动数据
+     // 8.初始化机器人运动数据
     send_robot_motion.frame_header.sof = SEND_SOF;
     send_robot_motion.frame_header.len = (uint8_t)(sizeof(SendDataRobotMotion_s) - 6);
     send_robot_motion.frame_header.id = ROBOT_MOTION_DATA_SEND_ID;
     append_CRC8_check_sum(  // 添加帧头 CRC8 校验位
         (uint8_t *)(&send_robot_motion.frame_header),
         sizeof(send_robot_motion.frame_header));
-    
     // 9.初始化地面机器人位置数据
     send_ground_robot_position.frame_header.sof = SEND_SOF;
     send_ground_robot_position.frame_header.len =(uint8_t)(sizeof(SendDataGroundRobotPosition_s) - 6);
@@ -422,9 +422,13 @@ void Usb::SendDebug(void)
  */
 void Usb::SendImu(void)
 {
-    LuojiaFox::ImuState imu = LuojiaFox::system_state.read().imu;
+    const auto imu = LuojiaFox::system_state.read().muzzle_imu;
+    const uint32_t now = HAL_GetTick();
+    if (imu.last_update_ms == 0U || now - imu.last_update_ms >= GIMBAL_IMU_TIMEOUT_MS) {
+        return;
+    }
 
-    send_imu.time_stamp = HAL_GetTick();
+    send_imu.time_stamp = now;
 
     send_imu.data.yaw = imu.yaw_deg;
     send_imu.data.pitch = imu.pitch_deg;
@@ -614,13 +618,13 @@ void Usb::SendRobotStatus(void)
     USB_Transmit((uint8_t *)&send_robot_status, sizeof(SendDataRobotStatus_s));
 }
 
+
 /**
  * @brief 发送云台状态数据
  * @param duration 发送周期
  */
 void Usb::SendJointState(void)
 {
-#if BOARD_ROLE == 2
     const auto state = LuojiaFox::system_state.read().gimbal;
     const uint32_t now = HAL_GetTick();
     if (!state.online ||
@@ -630,7 +634,6 @@ void Usb::SendJointState(void)
     send_joint_state.data.yaw = state.joint_yaw_rad;
     append_CRC16_check_sum((uint8_t *)&send_joint_state, sizeof(SendDataJointState_s));
     USB_Transmit((uint8_t *)&send_joint_state, sizeof(SendDataJointState_s));
-#endif
 }
 
 /**

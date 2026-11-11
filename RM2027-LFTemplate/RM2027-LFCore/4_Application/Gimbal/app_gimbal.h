@@ -30,6 +30,9 @@ struct DebugState {
     bool joint_control;
 };
 extern DebugState g_debug;
+extern DebugState g_big_yaw_debug;
+bool initSmallGimbal();
+void controlSmallGimbal();
 bool bigYawCentered();
 
 } // namespace gimbal

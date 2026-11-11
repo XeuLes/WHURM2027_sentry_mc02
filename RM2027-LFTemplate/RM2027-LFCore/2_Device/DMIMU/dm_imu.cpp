@@ -68,6 +68,8 @@ void onCanFrame(FDCAN_HandleTypeDef* bus, const FDCAN_RxHeaderTypeDef* header,
     // Report types 4, 3, 2, 1 correspond to bits 0, 1, 2, 3.
     imu.received_mask |= 1U << (QUAT_DATA - data[0]);
     imu.last_rx_ms = HAL_GetTick();
+    if (data[0] == EULER_DATA) { imu.euler_rx_ms = imu.last_rx_ms; }
+    if (data[0] == GYRO_DATA) { imu.gyro_rx_ms = imu.last_rx_ms; }
 }
 
 bool sendCommand(uint8_t reg_id, uint8_t action, uint32_t value)

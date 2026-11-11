@@ -45,32 +45,8 @@ CSTD = -std=gnu11
 
 # C++ standard
 CPPSTD = -std=gnu++14
-# 选择编译板类型。目标名在解析阶段设置角色和独立构建目录，
-# 这样不需要递归调用 make，也能正确继承并行参数。
-BOARD_BUILD_GOALS := $(filter board-chassis board-gimbal,$(MAKECMDGOALS))
+BUILD_DIR ?= build/board_master
 
-ifneq ($(words $(BOARD_BUILD_GOALS)),0)
-  ifneq ($(words $(BOARD_BUILD_GOALS)),1)
-    $(error Build board-chassis and board-gimbal in separate make commands)
-  endif
-
-  ifeq ($(BOARD_BUILD_GOALS),board-chassis)
-    BOARD_ROLE := 1
-    BUILD_DIR := build/board_chassis
-  else
-    BOARD_ROLE := 2
-    BUILD_DIR := build/board_gimbal
-  endif
-endif
-
-BOARD_ROLE ?= 0
-BUILD_DIR ?= build
-
-ifeq ($(BOARD_ROLE),0)
-  ifeq ($(filter board-chassis board-gimbal clean,$(MAKECMDGOALS)),)
-    $(error BOARD_ROLE must be 1 or 2; use "make board-chassis" or "make board-gimbal")
-  endif
-endif
 #######################################
 # paths
 #######################################
@@ -161,7 +137,6 @@ C_DEFS =  \
 -DUSE_HAL_DRIVER \
 -DSTM32H723xx 
 
-C_DEFS += -DBOARD_ROLE=$(BOARD_ROLE)
 
 # AS includes
 AS_INCLUDES =  \
@@ -197,11 +172,9 @@ C_INCLUDES =  \
 
 include Core.mk
 
-.PHONY: performance board-chassis board-gimbal
+.PHONY: performance
 performance:
 	$(MAKE) BUILD_DIR=build/performance OPT=-O3 LFCORE_OPT=-O3 LFCORE_PROFILE=0 all
 
-board-chassis: all
 
-board-gimbal: all
 # *** EOF ***

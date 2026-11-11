@@ -10,9 +10,9 @@ namespace gimbal { namespace detail {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kDegToRad = kPi / 180.0f;
 constexpr float kDt = GIMBAL_PERIOD_MS * 0.001f;
-float clamp(float x, float lo, float hi) { return fmaxf(lo, fminf(x, hi)); }
-float wrap(float x) { return remainderf(x, 2.0f * kPi); }
-float stick(int16_t raw) {
+inline float clamp(float x, float lo, float hi) { return fmaxf(lo, fminf(x, hi)); }
+inline float wrap(float x) { return remainderf(x, 2.0f * kPi); }
+inline float stick(int16_t raw) {
     const float x = clamp(static_cast<float>(raw) * RC_TO_ONE, -1.0f, 1.0f);
     return fabsf(x) < GIMBAL_RC_DEADZONE ? 0.0f : x;
 }

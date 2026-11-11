@@ -32,13 +32,19 @@ void SystemStateStore::updateImu(const ImuState &state)
     taskEXIT_CRITICAL();
 }
 
+void SystemStateStore::updateMuzzleImu(const ImuState &state)
+{
+    taskENTER_CRITICAL();
+    g_system_state.muzzle_imu = state;
+    taskEXIT_CRITICAL();
+}
+
 void SystemStateStore::updateChassis(const ChassisState &state)
 {
     taskENTER_CRITICAL();
     g_system_state.chassis = state;
     taskEXIT_CRITICAL();
 }
-
 
 void SystemStateStore::updateGimbal(const GimbalState &state)
 {

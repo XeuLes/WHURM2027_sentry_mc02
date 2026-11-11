@@ -2,14 +2,13 @@
 // 参考实现 Copyright (C) 2024 Polarbear, 2026 LuojiaFox。
 #include "shoot_config.hpp"
 
-#if BOARD_ROLE == 2 
-
 #include "alg_basic.hpp"
 #include "alg_smc.hpp"
 #include "app_board_link.hpp"
 #include "app_gimbal.h"
 #include "dvc_dji_motor.hpp"
 #include "lf_core.hpp"
+#include "referee.hpp"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -154,15 +153,14 @@ bool sentry_fric_ready()
 void ShootObserver()
 {
     const auto system = LuojiaFox::system_state.read();
-    board_link::ChassisToGimbalPayload remote{};
+    const auto power = referee.GetPowerSupplySnapshot();
     uint32_t now;
-    bool peer_online;
+    const bool peer_online = board_link::isPeerOnline();
     bool rc_online;
     char sw;
     {
         MotorCriticalSection lock;
         now = HAL_GetTick();
-        peer_online = board_link::getRemoteChassisData(&remote) && board_link::isPeerOnline(now);
         rc_online = !getRcOffline();
         sw = getDt7RcSw(SHOOT_MODE_CHANNEL);
         SHOOT.stop_requested = rc_online &&
@@ -198,13 +196,12 @@ void ShootObserver()
     }
     SHOOT.sentry_fric_cmd = SHOOT.aim_lost_time < kAimLostMs;
 
-    SHOOT.heat_fresh = peer_online &&
-        remote.referee_online && remote.power_received && remote.buffer_received &&
-        remote.power_age_ms < kRefereeTimeoutMs &&
-        remote.buffer_age_ms < kRefereeTimeoutMs && remote.shooter_heat_limit != 0U;
-    SHOOT.cooling_value = remote.shooter_cooling_value;
-    SHOOT.heat_limit = remote.shooter_heat_limit;
-    SHOOT.heat = remote.shooter_17mm_heat;
+    SHOOT.heat_fresh = peer_online && power.online && power.power_received &&
+        power.buffer_received && now - power.power_tick < kRefereeTimeoutMs &&
+        now - power.buffer_tick < kRefereeTimeoutMs && power.shooter_heat_limit != 0U;
+    SHOOT.cooling_value = power.shooter_cooling_value;
+    SHOOT.heat_limit = power.shooter_heat_limit;
+    SHOOT.heat = power.shooter_17mm_heat;
 }
 
 void ShootHandleException()
@@ -417,5 +414,3 @@ extern "C" void Shoot_Task(void const* argument)
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(kControlMs));
     }
 }
-
-#endif

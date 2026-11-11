@@ -1,47 +1,24 @@
 /**
  * @file app_chassis.cpp
- * @brief 四轮全向底盘应用编排。
+ * @brief 主控底盘目标计算。
  *
- * 本文件只负责初始化和单周期调度。车型参数、命令选择、功率仲裁以及
- * 反馈/控制算法分别位于 chassis_config、chassis_command、
- * chassis_power_manager 和 chassis_controller。
+ * 使用 chassis_command 仲裁模式并生成速度目标，由 BoardLink 下发。
  */
 
 #include "app_chassis.h"
 
 #include "chassis_command.hpp"
-#include "chassis_config.hpp"
-#include "chassis_controller.hpp"
-#include "chassis_power_manager.hpp"
 #include "cmsis_os.h"
 #include "dvc_buzzer.hpp"
 #include "lf_core.hpp"
 #include "main.h"
 #include "remote_control.h"
-
-namespace {
-
-//反馈回调函数
-void publishChassisVelocity(const chassis_app::ChassisFeedback& feedback)
-{
-    LuojiaFox::system_state.updateChassis({
-        feedback.vx,
-        feedback.vy,
-        feedback.wz
-    });
-}
-
-} // namespace
+#include "app_board_link.hpp"
 
 void Chassis_Init(void)
 {
     chassis_app::g_chassisCommandSelector =
         chassis_app::ChassisCommandSelector();
-    chassis_app::g_chassisPowerManager.init();
-
-    if (!chassis_app::g_chassisController.init()) {
-        Error_Handler();
-    }
 }
 
 void Chassis_Control(void)
@@ -58,14 +35,9 @@ void Chassis_Control(void)
             now_ms
         );
     buzzer.update(now_ms);
-    const chassis_app::ChassisFeedback feedback =
-        chassis_app::g_chassisController.readFeedback(state.imu, now_ms);
-    publishChassisVelocity(feedback);
 
-    // 模式切换后的首周期先停车并清除积分，避免继承上一控制源的历史状态。
-    // 模式切换时通过蜂鸣器提示。
+    // BoardLink 在模式变化时先发送无效目标；本任务只做提示和目标更新。
     if (selection.mode_changed) {
-        chassis_app::g_chassisController.stop();
         switch (selection.mode) {
         case CHASSIS_MODE_DISABLED:
             buzzer.playBeeps(1U);
@@ -79,30 +51,13 @@ void Chassis_Control(void)
         default:
             break;
         }
-        return;
     }
 
-    float target_current[chassis_app::kWheelCount] = {};
-    if (!chassis_app::g_chassisController.calculate(
-            selection.command,
-            feedback,
-            target_current
-        )) {
-        chassis_app::g_chassisController.sendZero();
-        return;
-    }
-
-    float limited_current[chassis_app::kWheelCount] = {};
-    if (!chassis_app::g_chassisPowerManager.apply(
-            feedback.wheel_omega,
-            target_current,
-            limited_current
-        )) {
-        chassis_app::g_chassisController.stop();
-        return;
-    }
-
-    chassis_app::g_chassisController.sendCurrents(limited_current);
+    const auto& command = selection.command;
+    board_link::publishChassisTarget({
+        command.vx, command.vy, command.wz,
+        static_cast<uint8_t>(selection.mode), command.ready, now_ms
+    });
 }
 
 ChassisModeTypedef Chassis_GetMode(void)
@@ -110,7 +65,6 @@ ChassisModeTypedef Chassis_GetMode(void)
     return chassis_app::g_chassisCommandSelector.mode();
 }
 
-#if BOARD_ROLE == 1
 extern "C" void Control_Task(void const *argument)
 {
     (void)argument;
@@ -119,4 +73,3 @@ extern "C" void Control_Task(void const *argument)
         osDelay(1);
     }
 }
-#endif

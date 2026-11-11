@@ -163,8 +163,6 @@ typedef struct {
 /* ----------------------- Internal Data ----------------------------------- */
 
 LF_EXTERN_C void remoteControlInit(void);
-/* Board-link task publishes validated remote samples on the chassis board. */
-LF_EXTERN_C void remoteControlPublishBoardLink(const RcControl* state, bool online, uint32_t now_ms);
 LF_EXTERN_C const RcControl* getRemoteControlPoint(void);
 LF_EXTERN_C const SbusData* getSbusPoint(void);
 LF_EXTERN_C uint8_t rcDataIsError(void);

@@ -33,9 +33,7 @@
 #include "bsp_can.h"
 #include "dm_imu.hpp"
 #include "dvc_bsp.h"
-#if BOARD_ROLE == 1
 #include "app_chassis.h"
-#endif
 #include "app_gimbal.h"
 #include "remote_control.h"
 /* USER CODE END Includes */
@@ -128,9 +126,7 @@ int main(void)
   MX_UART5_Init();
   MX_SPI2_Init();
   MX_TIM3_Init();
-#if BOARD_ROLE == 1
   MX_TIM12_Init();
-#endif
   MX_UART7_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
@@ -144,16 +140,14 @@ int main(void)
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
   remoteControlInit();
 
-  /* 启动三路 FDCAN；底盘/云台/发射模块随后自行注册电机 */
+  /* CAN1/CAN2 接本地电机，CAN3 接枪口 DM-IMU 与副板。 */
   bspFdcanInit();
   /* DM-IMU 在设备侧配置主动上报。 */
   if (!dm_imu_init(0x01U, 0x11U, &hfdcan3)) {
       Error_Handler();
   }
 
-#if BOARD_ROLE == 1
   Chassis_Init();
-#endif
   if (!Gimbal_Init()) {
       Error_Handler();
   }

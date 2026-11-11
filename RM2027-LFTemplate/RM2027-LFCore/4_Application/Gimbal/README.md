@@ -7,44 +7,32 @@
 ## 文件与任务
 
 - `gimbal_config.h`：硬件、机械中值、限位、SMC、扫描和跟随参数宏。
-- `app_gimbal_big_yaw.cpp`：底盘板大 yaw 控制状态机和任务入口。
-- `app_gimbal_small_yaw.cpp`：云台板小 yaw、roll、pitch 控制状态机和任务入口。
+- `app_gimbal_big_yaw.cpp`：主控的大 Yaw 目标状态机和云台任务入口。
+- `app_gimbal_small_yaw.cpp`：主控的小 Yaw、Roll、Pitch 状态机及本地电机闭环。
 - `gimbal_axis.hpp`：DJI、DM 反馈和共用的单轴 SMC。
 - `app_gimbal.h`：编译后唯一的 `Gimbal_Init/Control/Task` 接口。
 - `main.c`：在 FDCAN 和底盘初始化后调用 `Gimbal_Init()`，注册失败进入
   `Error_Handler()`。
 - `freertos.c`：静态创建独立云台任务，以 `vTaskDelayUntil` 按 1 ms 周期运行。
 
-| `BOARD_ROLE` | 本地执行器 | 遥控输入 | 协同输入 |
-| --- | --- | --- | --- |
-| `1`（底盘板） | 大 yaw | 本板接收机 | 云台板的小 yaw 偏角、模式 |
-| `2`（云台板） | 小 yaw + roll + pitch | 底盘板经板间转发 | 本板 IMU、USB 目标 |
-
-大小 yaw 与板间通信使用同一个 `BOARD_ROLE`，不再手动切换云台开关：
-
-```powershell
-mingw32-make board-chassis -j4  # BOARD_ROLE=1，大 yaw，输出 build/board_chassis
-mingw32-make board-gimbal -j4   # BOARD_ROLE=2，小 yaw/pitch，输出 build/board_gimbal
-```
-
-两个独立 cpp 内部仍通过 `#if` 排除另一套控制实现。
-VS Code 的 `STM32H723-Chassis/Gimbal` 配置也通过 `BOARD_ROLE` 自动解析对应云台。
-本地调参构建使用自己的启动代码和任务，并从源文件列表排除生产云台。
+在 LF 工程目录执行 `mingw32-make -j4` 编译主控，固件输出到 `build/board_master`。
+主控直接连接遥控、裁判系统和 USB 上位机，CAN1 直驱小云台，CAN2 直驱发射，
+CAN3 与枪口 DM-IMU 和独立的副板共线。副板负责底盘、大 Yaw 电机和超级电容。
 
 ## 填写宏
 
 正式固件启动时初始化对应云台。烧录前填写 `gimbal_config.h` 中的实车配置。
 
-大 yaw 为 DM4310，默认底盘板 CAN2。小 yaw 为直驱 GM6020，roll 和 pitch
-为 DM4310，三者共用云台板 CAN1。CAN 口、ID、方向、中位、限位及 SMC 参数均待实测。
+大 Yaw 为副板驱动的 DM4310。小 Yaw 为直驱 GM6020，Roll 和 Pitch
+为 DM4310，三者共用主控 CAN1。CAN 口、ID、方向、中位、限位及 SMC 参数均待实测。
 
 `GIMBAL_YAW_MID_ECD` 填小 yaw 居中时的原始编码器计数 `[0,8191]`，
 关节角为当前计数减中值后折算的单圈有符号偏角。`*_MID_RAD` 填 DM
 在相应机械中位时报告的原始输出轴角度，取安装方向修正前的数值。
-过洞时大 yaw 保持进入时的机械角。用于关节闭环的实际行程须完整落在
+过洞时大 Yaw 回机械中位。用于关节闭环的实际行程须完整落在
 DM 配置的反馈位置范围内。pitch 和 roll 的机械限位须在中位两侧半圈以内。
 
-三台 DM 用调试助手配置 **MIT**，CAN ID、Master ID 和 P/V/T 编码范围要与宏一致。
+本地两台 DM 用调试助手配置 **MIT**，CAN ID、Master ID 和 P/V/T 编码范围要与宏一致。
 MC02 的 SMC 输出力矩，MIT 帧的 `kp/kd` 为零。`*_OUTPUT_MAX_NM` 为软件力矩限幅，
 `GIMBAL_DM_TORQUE_MAX_NM` 是协议编码范围。DM4310-2EC 有输出轴单圈绝对编码器，
 驱动器已经将位置反馈折算到输出轴。10∶1 是电机内部减速比，MC02 按外部传动比 1 处理。
@@ -53,7 +41,14 @@ GM6020 的 `GIMBAL_YAW_OUTPUT_MAX` 为原始电压指令限幅。所有控制角
 
 ## 控制行为
 
-两块板各自的 `Gimbal_Control()` 采集反馈、处理模式和异常、生成目标、计算输出、发送并发布状态。
+主控的 `Gimbal_Control()` 先完成小云台闭环，再运行大 Yaw 目标状态机并发布参考。
+底盘的遥控、USB 命令选择和速度限幅也在主控完成。副板以收到的目标计算电机输出及功率限制。
+主控 BoardLink 在发送 `0x310` 前完成平移坐标转换：遥控和上位机输入都定义在枪口系，
+统一使用枪口相对底盘总偏角（大 Yaw + 小 Yaw）。SENTRY 中仅使用大 Yaw 的约定
+不适用于此处已明确的枪口系速度；小 Yaw 偏转时也必须参与转换。
+`vx_b = cos(a)*vx - sin(a)*vy`，`vy_b = sin(a)*vx + cos(a)*vy`；`wz` 保持主控目标。
+旋转后若超过现有底盘轴向速度上限，等比例缩放平移速度以保持方向。
+所需偏角失效或超时时发送无效底盘目标。副板收到的速度已在底盘系，不再用 `0x312` 重复旋转。
 大 yaw 先由 `selectMode` 选出目标模式，再由 `handleException` 处理失能、反馈故障及 DM 使能确认。
 小 yaw/pitch 根据本板 USB 目标进入 AUTO_AIM。SCAN 时小 yaw 相对大 yaw 居中、pitch 正弦运动。
 异常处理会跳过目标与闭环计算。GM6020 发送零指令，DM 发送失能命令并读取驱动状态。
@@ -66,7 +61,7 @@ GAP、SCAN 或自瞄及阈值跟随。进入扫描前先经 GAP 捕获当前 IMU
 | 模式 | 行为 |
 | --- | --- |
 | 零力 | 遥控下档、板间断联或反馈故障时停止输出 |
-| INIT | 云台板按机械角将小 yaw 和 pitch 回中；成功后 GAP，超时进入 FAULT，需下档清故障。大 yaw 解锁后直接捕获当前 IMU 朝向 |
+| INIT | 主控按机械角将小 yaw 和 pitch 回中；成功后 GAP，超时进入 FAULT，需下档清故障。大 yaw 解锁后直接捕获当前 IMU 朝向 |
 | GAP | 以进入时的姿态为参考，等待协同端就绪 |
 | 中档 MANUAL | 右水平摇杆驱动大 yaw，小 yaw 机械居中；右竖直摇杆控制 pitch |
 | SCAN | 大 yaw 连续扫描；小 yaw 相对大 yaw 居中，pitch 正弦扫描 |
@@ -79,51 +74,68 @@ GAP、SCAN 或自瞄及阈值跟随。进入扫描前先经 GAP 捕获当前 IMU
 使用单圈角，位置误差和相邻参考的差值都取最短圆周差。大 yaw 的普通模式从切换时的
 IMU 朝向起算，移动参考领先当前朝向最多 `GIMBAL_BIG_YAW_MAX_LEAD_RAD`。
 小 yaw 的回中、手动、扫描和过洞都使用机械角及电机相对速度。
-模式切换重置 SMC 历史，机械限位同时约束关节目标和向外输出。
-CAN 发送失败锁定故障。需在调试助手配置驱动器自身的通信超时保护。
+小云台模式切换会重置本地 SMC 历史，机械限位同时约束关节目标和向外输出。
+小云台电机 CAN 发送失败时锁定故障。驱动器自身的通信超时保护通过调试助手设置。
 
-每板的本地 IMU 必须能反映该板所控 yaw 轴的姿态，云台板 IMU 还须反映
-pitch。若底盘板 IMU 固定在底盘、不能测量大 yaw 的旋转，不能直接用该
-姿态闭环：需要先通过机械运动学合成大 yaw 姿态再接入。
-当前使用工程 INS 的轴定义，并由 body q/r 换算 Euler yaw/pitch 角速度；
-这不构成任意倾斜下的完整机械解耦，接近 pitch ±90° 时停止控制。
-IMU 新鲜度表示 INS 发布周期正常，不代表已验证传感器的硬件健康。
+主控 MC02 固定在大 Yaw 转动件上，板载 BMI088 发布大 Yaw 姿态到 `system_state.imu`。
+枪口 DM-IMU 发布欧拉角和陀螺数据到 `system_state.muzzle_imu`，供小云台闭环及 USB IMU 上报。
+DM-IMU 使用设备 ID `0x01`、反馈 ID `0x11`。在设备端开启 CAN 主动上报欧拉角和角速度。
+两个数据类型各占一帧，虽然共用同一个 CAN ID。1 kHz 方案只启用欧拉角和角速度，关闭四元数和加速度的主动上报。
+两种数据分别记录最后接收时间，任一种达到 20 ms 时，小云台停止依赖该姿态的闭环。
+两路 IMU 都沿用现有机体轴约定，安装后核对枪口的正方向与坐标轴。
 
 ## 板间通信与 USB
 
-底盘板直接接收遥控器，
-在 `ChassisToGimbalPayload` 中转发遥控通道、拨杆和键鼠。
-云台板在 `GimbalToChassisPayload` 中发送
-`small_yaw_offset_rad/gimbal_mode`。偏角用于阈值跟随，模式用于区分扫描和自瞄；
-同帧的 `gimbal_cmd/gimbal_cmd_tick_ms` 转发 RobotCmd 的过洞请求和云台板接收时刻。
-两个板的本地时钟独立，底盘板使用板间接收时间判断链路是否在线。
-不额外发送 ready、pitch joint、online 或数据年龄。
-小云台 IMU yaw/pitch 留在云台板用于瞄准，不通过板间发送。
-底盘接收后更新 FXCore `GimbalState` 的 yaw 关节角、模式和接收状态，
-其中 `joint_yaw_rad` 来自小 yaw 偏角；底盘镜像的 `yaw_deg/pitch_deg`
-没有远端姿态含义，不可用于瞄准。底盘板直接接收裁判系统，
-在 `ChassisToGimbalPayload` 中转发机器人 ID、剩余血量、底盘功率上限和
-缓冲能量。云台板从板间通信读取遥控状态，不创建裁判接收任务。
-底盘控制和超电控制直接使用本板裁判数据。两板需要同时更新固件，
-布局不匹配的固件不会通过长度校验，版本不同的固件不会通过版本校验。
-自动分支收到小云台的 INIT/GAP/FAULT 状态时，大 yaw 保持当前 IMU 朝向，
-收到零力状态时停止输出。板间中断时大 yaw 停止输出。
+[CAN3 帧定义](../../2_Device/Communication/board_link_can.hpp)可直接用于独立的副板工程。
+CAN3 使用 1 Mbit/s、11 位 ID 的经典 CAN 数据帧，多字节字段小端。
+`flags` 高半字节为版本 2，`sequence` 为 8 位循环计数。
+`dvc_board_link_can` 负责收发、校验、反馈快照和统计。
+`app_board_link` 负责每毫秒下发三条目标、偏角分频、目标失效处理与业务数据编码。
 
-云台使用当前公共接口的 `ImuState.last_update_ms` 和
-`RobotCmdState.last_update_ms` 检查数据新鲜度；时间戳为 0 表示尚未发布有效数据。
-本地状态发布接入代码在收到新 IMU/指令时记录本板时间，不依赖旧的 `valid/updated_at_ms` 字段。
-`system_state` 保存关节角和模式状态，
-`gimbal::g_debug` 可在调试器观察反馈、参考、原始命令、模式及发送失败计数。
-大 yaw 的电机反馈、控制状态和 debug 留在本地，不写入 FXCore `GimbalState`。
-`GimbalState` 表示小 yaw/pitch 瞄准组件：IMU yaw 为姿态角，
-`joint_yaw_rad` 为小 yaw 相对大 yaw 的机械偏角。底盘只保存小 yaw 偏角与模式，
-不镜像 pitch 或瞄准姿态，也不根据接收报文推定 ready。
-接收镜像保留最后一帧，不额外修改其 online/ready；判断通信是否在线使用已有
-`isPeerOnline()`。大小 yaw 控制器仍按该通信状态处理断联。
-云台收到的大 yaw IMU 和裁判功率字段保存在 `getRemoteChassisData()` 中：
-前者不能覆盖小云台的本地 IMU，后者目前没有对应的 FXCore 功率状态字段。
-云台板通过现有 USB `JointState` 包发送真实小 yaw/pitch 关节角，单位 rad；
-无有效反馈时不发送伪造的零关节角。
+| CAN ID | 方向 | 周期 | DLC | 数据 |
+| --- | --- | --- | ---: | --- |
+| `0x310` | 主控 → 副板 | 1 ms | 8 | 底盘坐标系 `vx/vy/wz`、目标有效位与主控选定的底盘模式 |
+| `0x311` | 主控 → 副板 | 1 ms | 8 | 大 Yaw 目标及闭环参考，含使能与参考系 |
+| `0x313` | 主控 → 副板 | 1 ms | 8 | 最新的裁判底盘功率上限、缓冲能量、在线位及两项数据的年龄 |
+| `0x312` | 主控 → 副板 | 10 ms | 6 | 大 Yaw 相对底盘偏角、枪口相对底盘总偏角 |
+| `0x319` | 副板 → 主控 | 2 ms | 4 | 大 Yaw 机械偏角、反馈有效位、使能就绪位、低速位 |
+| `0x318` | 副板 → 主控 | 10 ms | 8 | 底盘系实测 vx/vy/wz、有效位和独立序号 |
+
+三条 1 kHz 报文同周期使用同一序号。发送裁判快照的频率为 1 kHz，快照仍以原裁判帧到达为准。
+`0x312` 使用独立序号。任务延误后继续提交最新目标。CAN3 沿用工程原有的 TX FIFO，
+自动重发关闭。仲裁失败时该帧可能丢失，主控在下一周期继续提交最新数据。
+
+按最坏位填充和帧间隔计算，8/6/4 字节的标准数据帧分别按 135/115/95 bit。
+DM-IMU 欧拉角和角速度各 1 kHz，加上表中报文共 5700 帧/s，预算 **74.75%**。
+仅额外开启四元数 1 kHz 时为 88.25%，四元数和加速度同时额外各开 1 kHz 时为 101.75%。
+当前关闭这两项设备端主动上报，保留 `imu_request_quat()`、四元数解析和数据字段，正常任务不请求四元数。
+主控丢弃某类帧不能降低线上负载，设备端输出选择必须匹配本预算。
+调试器中的 `board_link::can3::g_can3_load` 每约 1 s 更新一次，显示估算千分比、RX FIFO 丢帧事件、
+TX 入队失败和总线错误。用 CAN 分析仪和接收端序号核对实测占用率和送达率。
+
+- 底盘速度的整数值分别以 0.001 m/s、0.001 m/s、0.001 rad/s 为单位。
+  Yaw 角和偏角以 0.0001 rad 为单位，大 Yaw 角速度以 0.002 rad/s 为单位。
+- 普通模式的 `0x311` 发送大 Yaw 绝对目标、BMI088 航向及航向角速度，角误差取最短圆周差。
+  过洞模式置位 `kBigYawJointFrame`，同一帧发送机械目标角、轨迹加速度和轨迹角速度，
+  加速度以 0.01 rad/s² 为单位。副板在该模式使用自己的电机位置和角速度闭环。
+- `0x319` 同时作为副板心跳。副板即使在大 Yaw 失能或反馈无效时也递增序号并发送。
+  当电机反馈有效且本地实测机械角速度绝对值小于 `kBigYawSlowSpeedRadS` 时置低速位。
+  主控用该位和机械偏角判定过洞回中，用偏角变化估计进入回中轨迹时的速度。
+- 主控 20 ms 未收到新心跳时下发无效运动目标。副板以自己的收帧时间看门狗，
+  大 Yaw 目标 20 ms、底盘目标 50 ms 超时即停止对应输出。
+  大 Yaw 使能位置位且目标无效时，只执行驱动器使能握手。
+  底盘切换模式时首帧无效，副板收到无效帧或模式变化时清除速度环历史。
+- 裁判功率上限单位 W，缓冲能量单位 J。年龄按 10 ms 向上取整，255 表示饱和。
+  副板以帧内年龄加本地收帧后的经过时间判断裁判字段是否新鲜。
+- 副板每 1 ms 从轮速/原有估计器更新底盘实测速度，以 100 Hz 发送 `0x318`。
+  全轮在线、速度估计有效且快照小于 10 ms 时置有效位；无效或数值超出编码范围时清除有效位。
+  主控按 50 ms 接收超时使反馈失效，发布到 `system_state.chassis`，不将目标速度当作反馈。
+- 主控 USB 恢复 `RobotMotion`（ID `0x08`），周期 10 ms，上报底盘坐标系实测 m/s、m/s、rad/s。
+  USB 时间戳使用该反馈在主控的接收时间，读取缓存不刷新。协议没有有效位，无效或超时时停发此包。
+  输入目标是枪口系，反馈仍沿用原 USB 底盘系定义，上位机使用时应区分二者。
+  `JointState` 继续上报有效的小 Yaw、Pitch 关节角，单位 rad。
+- 主控可在调试器观察 `board_link::g_tx_debug` 的发送镜像、`gimbal::g_debug` 的小云台状态和
+  `gimbal::g_big_yaw_debug` 的大 Yaw 目标。
 
 USB RobotCmd 的 yaw/pitch 与 SENTRY_MAIN 一致，为**云台 IMU 坐标系下的绝对目标角（rad）**。
 板端直接写入 `RobotCmdState.gimbal_yaw/gimbal_pitch`。
@@ -146,7 +158,7 @@ RobotCmd 继续使用 ID `0x01` 和现有的 `uint32_t time_stamp`。新版在�
 目标连续 `GIMBAL_AIM_LOST_MS` 未变化，或 RobotCmd 超过 `GIMBAL_AIM_TIMEOUT_MS`
 未更新时，经 GAP 转入扫描。
 
-云台任务统一发送 GM6020 组帧和各台 DM 的独立 MIT 帧。
+云台任务直接发送小云台的 GM6020 组帧和两台 DM 的独立 MIT 帧。
 初始化检查发送帧归属及同一 CAN 总线上 DM 的 ID 冲突。
 
 ## 验证范围
@@ -155,7 +167,7 @@ RobotCmd 继续使用 ID `0x01` 和现有的 `uint32_t time_stamp`。新版在�
 
 ## 过洞模式（小 yaw → roll → pitch）
 
-云台进入 `Mode::kPassage` 后，由云台板的 `PassageStage` 状态机控制小 yaw、roll、pitch。
+云台进入 `Mode::kPassage` 后，由主控的 `PassageStage` 状态机控制小 yaw、roll、pitch。
 正常过洞时，大 yaw 与小 yaw、pitch 同时对齐。大 yaw 限速回到
 `GIMBAL_BIG_YAW_MID_RAD` 对应的机械中位，实测到位后发确认。退出后以当前 IMU 朝向建立普通模式的参考。
 右拨杆在中档时，ET08A 第 5 通道（`rc.s[2]`）的辅助开关控制过洞。
@@ -163,9 +175,8 @@ RobotCmd 继续使用 ID `0x01` 和现有的 `uint32_t time_stamp`。新版在�
 `GIMBAL_PASS_SWITCH_INDEX/POSITION` 配置。右拨杆上档或遥控离线时，
 从 USB 获取过洞请求及自瞄目标。过洞过程中也按当前控制档选择有效请求。
 SB（第 7 通道、`rc.s[0]`）下档仍为总锁定；SC（第 8 通道、`rc.s[1]`）继续选择底盘模式。
-板间协议转发四个开关槽位。
 
-| 阶段 | 云台板 | 大 yaw |
+| 阶段 | 小云台 | 大 Yaw |
 | --- | --- | --- |
 | Align | 小 yaw、pitch 沿轨迹到停放角，roll 保持直立。等待本地关节到位和大 yaw 确认 | 沿轨迹回中并确认 |
 | Fold | roll 限速侧翻，小 yaw、pitch 闭环守住固定停放角 | 保持中位 |
@@ -179,10 +190,8 @@ SB（第 7 通道、`rc.s[0]`）下档仍为总锁定；SC（第 8 通道、`rc.
 调试对象 `gimbal::g_debug.passage_stage` 显示过洞阶段，
 `joint_roll_rad/target_roll_rad/roll_torque_nm` 用于观察 roll。
 
-大 yaw 收到 `gimbal_mode = kPassage` 后回中，并在云台退出过洞前保持中位。
-实测到位并稳定后，底盘回传 `big_yaw_centered = 1`，其余情况回传 0。
-云台使用进入该流程后收到的新报文确认大 yaw 到位。
-板间协议版本为 4，两板需同时更新固件。
+进入 `kPassage` 后，主控下发大 Yaw 机械回中轨迹，并在小云台退出过洞前保持中位。
+小云台使用进入该流程后收到的大 Yaw 新机械反馈确认回中，确认稳定后才开始折叠。
 对齐、放倒或回正超过 `GIMBAL_PASS_PHASE_TIMEOUT_MS` 后进入 Fault。
 断联、锁定、电机/CAN 故障会打断流程，不能自动回普通初始化。
 过洞故障后，等反馈和控制条件恢复，再将当前过洞请求先撤销、后重新发出以尝试回正。
@@ -191,18 +200,3 @@ SB（第 7 通道、`rc.s[0]`）下档仍为总锁定；SC（第 8 通道、`rc.
 
 过洞默认 pitch 为机械 0、roll 为单侧 +π/2；方向、限位、速度/加速度、位置/速度容差及稳定时间
 均需按机构实测填写。
-
-## 与合并后底盘的安装约束
-
-2026-11-05：本次适配已通过 `BOARD_ROLE=1/2` 的 ARM 完整编译和 ELF 链接，
-产物及日志位于 `build/gimbal_compat_chassis*`、`build/gimbal_compat_small*`。
-主机模拟通过手动/扫描/自瞄超时、IMU 未发布/过期/时间戳回绕、独立过洞开关、
-过洞完成/取消/无确认/未对齐/断联/CAN 发送失败/电机掉线和大 yaw 保持检查。
-模拟使用真实云台状态机和 SMC，硬件及板间输入由桩替代；未烧录、未做实机验证。
-
-本次兼容适配保留远程底盘、INS、运动补偿和公共状态结构定义。
-当前大 yaw 控制要求本板 IMU 反映大 yaw 姿态，而新底盘运动补偿直接把本板
-IMU 角速度和线性加速度作为底盘数据。IMU 随大 yaw 转动时，这两个坐标系并不相同；
-仅修改云台时间戳和开关不能解决该问题。大 yaw 单独转动会污染打滑判断，
-进而可能使底盘停车。需要另行确认 IMU 安装和底盘运动数据来源，在底盘侧接入
-独立 IMU 或经过关节运动学转换的数据；本次没有修改该底盘算法。

@@ -14,7 +14,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include <stdint.h>
 
-#include "Board_cfg/board_cfg.hpp"
 #include "remote_control.h"
 
 /* Exported macros -----------------------------------------------------------*/
@@ -42,9 +41,9 @@ struct ImuState
 
 struct ChassisState
 {
-    float vx;
-    float vy;
-    float wz;
+    float vx = 0, vy = 0, wz = 0; // 底盘坐标系，m/s、m/s、rad/s
+    bool valid = false;
+    uint32_t last_update_ms = 0; // 副板反馈接收时间，重复读取不得刷新
 };
 
 struct GimbalState
@@ -57,6 +56,7 @@ struct GimbalState
     uint8_t mode = 0U;
     bool ready = false;
     uint32_t updated_at_ms = 0U;
+    bool yaw_joint_online = false;
 };
 
 struct ShooterState
@@ -104,13 +104,14 @@ struct VirtualRcState
 struct SystemStateSnapshot
 {
     ImuState imu;
-    ChassisState chassis;
     GimbalState gimbal;
     ShooterState shooter;
     RefereeState referee;
     RobotCmdState robot_cmd;
     UsbLinkState usb_link;
     VirtualRcState virtual_rc;
+    ImuState muzzle_imu; // imu 仍是固定在大 Yaw 上的板载 INS
+    ChassisState chassis;
 };
 
 class SystemStateStore
@@ -118,6 +119,7 @@ class SystemStateStore
 public:
     // Call these methods from FreeRTOS task context, not from an ISR.
     void updateImu(const ImuState &state);
+    void updateMuzzleImu(const ImuState &state);
     void updateChassis(const ChassisState &state);
     void updateGimbal(const GimbalState &state);
     void updateShooter(const ShooterState &state);

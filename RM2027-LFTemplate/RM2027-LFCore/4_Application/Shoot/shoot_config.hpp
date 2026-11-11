@@ -1,6 +1,6 @@
 #pragma once
 
-// 两块板均设为 1 后重新编译。默认关闭，待确认接线、拨杆和机械参数。
+// 主控发射机构使能开关。
 #ifndef SHOOT_ENABLE
 #define SHOOT_ENABLE 1
 #endif

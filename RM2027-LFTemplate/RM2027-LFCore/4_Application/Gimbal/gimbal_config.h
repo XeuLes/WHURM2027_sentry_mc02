@@ -1,6 +1,6 @@
 #pragma once
 
-/* DM4310-2EC in MIT mode. Master IDs below are configuration placeholders. */
+/* 大 Yaw 电机参数供副板移植，主控只使用目标规划参数。 */
 #define GIMBAL_BIG_YAW_CAN (&hfdcan2)
 #define GIMBAL_BIG_YAW_ID 1U
 #define GIMBAL_BIG_YAW_MASTER_ID 0x51U

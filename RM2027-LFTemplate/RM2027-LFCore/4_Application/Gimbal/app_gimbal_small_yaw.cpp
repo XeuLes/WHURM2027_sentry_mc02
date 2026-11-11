@@ -1,6 +1,5 @@
-// Gimbal board: small yaw, roll and pitch. Big yaw is controlled separately.
+// 主控直驱小 Yaw、Roll 和 Pitch。
 #include "app_gimbal.h"
-#if BOARD_ROLE == 2
 #include "app_board_link.hpp"
 #include "lf_core.hpp"
 #include "fdcan.h"
@@ -21,7 +20,7 @@ struct PassageControl {
     PassageStage stage = PassageStage::kIdle;
     JointTrajectory yaw_path, pitch_path, roll_path;
     float yaw_goal = 0, pitch_goal = GIMBAL_PASS_PITCH_RAD;
-    uint32_t stage_start = 0, settled_ms = 0, entry_sequence = 0;
+    uint32_t stage_start = 0, settled_ms = 0, entry_feedback_revision = 0;
     bool center_confirmed = false, rearmed = false;
 } passage;
 bool initialized = false;
@@ -40,6 +39,7 @@ struct ControlCycle {
     float aim_pitch = 0;
     float roll_feedforward_nm = 0;
     bool online = false;
+    bool yaw_joint_online = false;
     bool peer_online = false;
     bool rc_online = false;
     bool stop = false;
@@ -48,7 +48,7 @@ struct ControlCycle {
     bool passage_requested = false;
     Mode normal_mode = Mode::kZeroForce;
     bool big_yaw_centered = false;
-    uint32_t chassis_sequence = 0;
+    uint32_t big_yaw_feedback_revision = 0;
     uint8_t sw = 0;
     int16_t rc_pitch = 0;
 };
@@ -84,7 +84,7 @@ void setPassageStage(PassageStage next, uint32_t now) {
 void startPassage(const ControlCycle& cycle, PassageStage first, float yaw_goal, float pitch_goal) {
     passage.yaw_goal = yaw_goal;
     passage.pitch_goal = pitch_goal;
-    passage.entry_sequence = cycle.chassis_sequence;
+    passage.entry_feedback_revision = cycle.big_yaw_feedback_revision;
     passage.center_confirmed = false;
     passage.rearmed = false;
     setMode(Mode::kPassage, cycle.yaw, cycle.pitch);
@@ -123,7 +123,9 @@ void send(const ControlCycle& cycle) {
     }
 }
 
-void publish(float yaw_pos, float pitch_pos, bool online) {
+void publish(const ControlCycle& cycle) {
+    const float yaw_pos = cycle.yaw;
+    const float pitch_pos = cycle.pitch;
     g_debug.mode = mode;
     g_debug.passage_stage = passage.stage;
     g_debug.yaw_rad = yaw_pos;
@@ -139,15 +141,16 @@ void publish(float yaw_pos, float pitch_pos, bool online) {
     g_debug.target_roll_rad = roll.target;
     g_debug.roll_torque_nm = roll.output;
     g_debug.joint_control = useJointPitch(mode);
-    g_debug.ready = online && calibrated && !init_failed && mode != Mode::kFault &&
+    g_debug.ready = cycle.online && calibrated && !init_failed && mode != Mode::kFault &&
                     mode != Mode::kZeroForce && passage.stage != PassageStage::kFault;
     g_debug.following = false;
     g_debug.init_failed = init_failed;
     LuojiaFox::GimbalState state{};
     state.yaw_deg = yaw_pos / kDegToRad;
     state.pitch_deg = pitch_pos / kDegToRad;
-    state.online = online;
+    state.online = cycle.online;
     state.joint_yaw_rad = yaw.joint;
+    state.yaw_joint_online = cycle.yaw_joint_online;
     state.joint_pitch_rad = g_debug.joint_pitch_rad;
     state.mode = static_cast<uint8_t>(mode);
     state.ready = g_debug.ready;
@@ -187,7 +190,7 @@ void selectControlRequest(ControlCycle& cycle, const LuojiaFox::RobotCmdState& a
 void observe(ControlCycle& cycle) {
     const auto state = LuojiaFox::system_state.read();
     cycle.now = HAL_GetTick();
-    const auto& imu = state.imu;
+    const auto& imu = state.muzzle_imu;
     cycle.yaw = imu.yaw_deg * kDegToRad;
     cycle.pitch = imu.pitch_deg * kDegToRad;
     const float r = imu.roll_deg * kDegToRad;
@@ -203,10 +206,13 @@ void observe(ControlCycle& cycle) {
     cycle.yaw_rate = imu_ok ?
         (q * sinf(r) + z * cosf(r)) / cosf(cycle.pitch) : 0;
     cycle.pitch_rate = q * cosf(r) - z * sinf(r);
-    const bool yaw_ok = yaw.observe(cycle.now);
+    cycle.yaw_joint_online = yaw.observe(cycle.now);
     const bool pitch_ok = pitch.observe(cycle.now);
     const bool roll_ok = roll.observe(cycle.now);
-    cycle.peer_online = board_link::isPeerOnline(cycle.now);
+    board_link::BigYawFeedback big_yaw{};
+    cycle.peer_online = board_link::getPeerBigYawFeedback(big_yaw);
+    cycle.big_yaw_centered = big_yaw.ready && gimbal::bigYawCentered();
+    cycle.big_yaw_feedback_revision = big_yaw.revision;
     cycle.rc_online = !getRcOffline();
     bool aux_passage = false;
     const RcControl* rc = getRemoteControlPoint();
@@ -217,16 +223,11 @@ void observe(ControlCycle& cycle) {
         aux_passage = rc->rc.s[GIMBAL_PASS_SWITCH_INDEX] == GIMBAL_PASS_SWITCH_POSITION;
         taskEXIT_CRITICAL();
     }
-    board_link::ChassisToGimbalPayload remote{};
-    board_link::getRemoteChassisData(&remote);
-    cycle.big_yaw_centered = remote.big_yaw_centered == 1U;
-    cycle.chassis_sequence = remote.sequence;
-
     selectControlRequest(cycle, state.robot_cmd, aux_passage);
 
     const bool mechanical_mode = mode == Mode::kPassage || passage.stage == PassageStage::kFault ||
                                  cycle.passage_requested;
-    cycle.online = yaw_ok && pitch_ok && roll_ok && (mechanical_mode || imu_ok);
+    cycle.online = cycle.yaw_joint_online && pitch_ok && roll_ok && (mechanical_mode || imu_ok);
 }
 
 void handleException(ControlCycle& cycle) {
@@ -294,7 +295,7 @@ void updatePassageStage(const ControlCycle& cycle) {
     }
 
     if (passage.center_confirmed && !cycle.big_yaw_centered) { failPassage(cycle); return; }
-    if (cycle.big_yaw_centered && cycle.chassis_sequence != passage.entry_sequence) {
+    if (cycle.big_yaw_centered && cycle.big_yaw_feedback_revision != passage.entry_feedback_revision) {
         passage.center_confirmed = true;
     }
     if (passage.stage == PassageStage::kHold) { return; }
@@ -449,7 +450,7 @@ void calculateOutput(const ControlCycle& cycle) {
 } // namespace
 } // namespace gimbal
 
-extern "C" bool Gimbal_Init(void) {
+bool gimbal::initSmallGimbal() {
     using namespace gimbal;
     if (initialized) { return true; }
     const float yaw_params[9] = GIMBAL_YAW_SMC_PARAMS;
@@ -466,7 +467,7 @@ extern "C" bool Gimbal_Init(void) {
     return initialized;
 }
 
-extern "C" void Gimbal_Control(void) {
+void gimbal::controlSmallGimbal() {
     using namespace gimbal;
     if (!initialized) { return; }
     ControlCycle cycle{};
@@ -476,18 +477,5 @@ extern "C" void Gimbal_Control(void) {
     updateReference(cycle);
     calculateOutput(cycle);
     send(cycle);
-    publish(cycle.yaw, cycle.pitch, cycle.online);
+    publish(cycle);
 }
-
-extern "C" void Gimbal_Task(void const* argument) {
-    (void)argument;
-    // Registration is completed in main(), before the scheduler starts.
-    TickType_t wake = xTaskGetTickCount();
-    const TickType_t period = pdMS_TO_TICKS(GIMBAL_PERIOD_MS);
-    configASSERT(period > 0U);
-    for (;;) {
-        Gimbal_Control();
-        vTaskDelayUntil(&wake, period);
-    }
-}
-#endif // BOARD_ROLE == 2
