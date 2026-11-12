@@ -10,6 +10,7 @@
 #include "app_chassis.h"
 
 #include "chassis_command.hpp"
+#include "app_board_link.hpp"
 #include "chassis_config.hpp"
 #include "chassis_controller.hpp"
 #include "chassis_power_manager.hpp"
@@ -29,14 +30,14 @@ void publishChassisVelocity(const chassis_app::ChassisFeedback& feedback)
         feedback.vy,
         feedback.wz
     });
+    board_link::publishChassisFeedback({feedback.vx, feedback.vy, feedback.wz,
+        feedback.velocity_estimate_valid && feedback.all_wheels_online, HAL_GetTick()});
 }
 
 } // namespace
 
 void Chassis_Init(void)
 {
-    chassis_app::g_chassisCommandSelector =
-        chassis_app::ChassisCommandSelector();
     chassis_app::g_chassisPowerManager.init();
 
     if (!chassis_app::g_chassisController.init()) {
@@ -49,14 +50,8 @@ void Chassis_Control(void)
     const LuojiaFox::SystemStateSnapshot state =
         LuojiaFox::system_state.read();
     const uint32_t now_ms = HAL_GetTick();
-    const bool rc_online = !getRcOffline();
-
     const chassis_app::ChassisCommandSelection selection =
-        chassis_app::g_chassisCommandSelector.update(
-            state.robot_cmd,
-            rc_online,
-            now_ms
-        );
+        board_link::getChassisSelection(now_ms);
     buzzer.update(now_ms);
     const chassis_app::ChassisFeedback feedback =
         chassis_app::g_chassisController.readFeedback(state.imu, now_ms);
@@ -107,16 +102,15 @@ void Chassis_Control(void)
 
 ChassisModeTypedef Chassis_GetMode(void)
 {
-    return chassis_app::g_chassisCommandSelector.mode();
+    return board_link::getChassisMode();
 }
 
-#if BOARD_ROLE == 1
 extern "C" void Control_Task(void const *argument)
 {
     (void)argument;
+    TickType_t wake = xTaskGetTickCount();
     for (;;) {
         Chassis_Control();
-        osDelay(1);
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(1U));
     }
 }
-#endif

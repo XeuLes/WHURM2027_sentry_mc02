@@ -7,7 +7,7 @@
 
 #include "app_supercap.h"
 #include "chassis_config.hpp"
-#include "referee.hpp"
+#include "app_board_link.hpp"
 
 namespace chassis_app {
 
@@ -43,7 +43,7 @@ void ChassisPowerManager::init()
  */
 float ChassisPowerManager::resolveLimit() const
 {
-    const RefereePowerSnapshot snapshot = referee.GetPowerSupplySnapshot();
+    const RefereePowerSnapshot snapshot = board_link::getRefereePowerSnapshot();
     float limit = kFallbackChassisPowerLimitW;
 
     if (snapshot.online && snapshot.power_received) {

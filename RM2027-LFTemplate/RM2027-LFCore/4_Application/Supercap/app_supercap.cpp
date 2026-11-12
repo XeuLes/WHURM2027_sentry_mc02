@@ -1,7 +1,7 @@
 #include "app_supercap.h"
 #include "supercap_config.h"
 #include "dvc_supercap.hpp"
-#include "referee.hpp"
+#include "app_board_link.hpp"
 #include "cmsis_os.h"
 
 namespace {
@@ -23,7 +23,7 @@ void superpower_task(void const* argument)
 {
     (void)argument;
     for (;;) {
-        const auto referee_data = referee.GetPowerSupplySnapshot();
+        const auto referee_data = board_link::getRefereePowerSnapshot();
         const bool values_ready = capacitor.updateReferee(
             referee_data.power_received ? (float)referee_data.power_limit_w : 0.0f,
             referee_data.buffer_received ? (float)referee_data.buffer_energy_j : 0.0f);

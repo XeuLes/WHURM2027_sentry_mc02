@@ -55,11 +55,9 @@ osThreadId insTaskHandle;
 uint32_t BoardLink_TaskBuffer[512];
 osStaticThreadDef_t BoardLink_TaskControlBlock;
 osThreadId BoardLink_TaskHandle;
-#if BOARD_ROLE == 1
 osThreadId superpower_handle;
 uint32_t SUPERPOWER_TaskBuffer[256];
 osStaticThreadDef_t SUPERPOWER_TaskControlBlock;
-#endif
 /* USER CODE END Variables */
 osThreadId Start_INS_TaskHandle;
 uint32_t Start_INS_TaskBuffer[ 2048 ];
@@ -67,26 +65,7 @@ osStaticThreadDef_t Start_INS_TaskControlBlock;
 osThreadId Start_Control_TaskHandle;
 uint32_t Start_Control_TaskBuffer[ 1024 ];
 osStaticThreadDef_t Start_Control_TaskControlBlock;
-osThreadId Start_Detect_TaskHandle;
-uint32_t Start_Detect_TaskBuffer[ 1024 ];
-osStaticThreadDef_t Start_Detect_TaskControlBlock;
-osThreadId Start_MiniPC_TaskHandle;
-uint32_t Start_MiniPC_TaskBuffer[ 1024 ];
-osStaticThreadDef_t Start_MiniPC_TaskControlBlock;
-osThreadId Start_Shoot_TaskHandle;
-uint32_t Start_Shoot_TaskBuffer[ 1024 ];
-osStaticThreadDef_t Start_Shoot_TaskControlBlock;
-#if BOARD_ROLE == 1
-uint32_t REFEREE_TaskBuffer[512];
-osStaticThreadDef_t REFEREE_TaskControlBlock;
-osThreadId referee_usart_task_handle;
-#endif
 
-#if BOARD_ROLE == 2
-uint32_t USB_TaskBuffer[1024];
-osStaticThreadDef_t USB_TaskControlBlock;
-osThreadId usb_task_handle;
-#endif
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -155,42 +134,23 @@ void MX_FREERTOS_Init(void) {
   osThreadStaticDef(Start_Control_Task, Control_Task, osPriorityAboveNormal, 0, 1024, Start_Control_TaskBuffer, &Start_Control_TaskControlBlock);
   Start_Control_TaskHandle = osThreadCreate(osThread(Start_Control_Task), NULL);
 
-  /* definition and creation of Start_Detect_Task */
-  osThreadStaticDef(Start_Detect_Task, Detect_Task, osPriorityBelowNormal, 0, 1024, Start_Detect_TaskBuffer, &Start_Detect_TaskControlBlock);
-  Start_Detect_TaskHandle = osThreadCreate(osThread(Start_Detect_Task), NULL);
 
-  /* definition and creation of Start_MiniPC_Task */
-  osThreadStaticDef(Start_MiniPC_Task, MiniPC_Task, osPriorityHigh, 0, 1024, Start_MiniPC_TaskBuffer, &Start_MiniPC_TaskControlBlock);
-  Start_MiniPC_TaskHandle = osThreadCreate(osThread(Start_MiniPC_Task), NULL);
 
-  /* definition and creation of Start_Shoot_Task */
-  osThreadStaticDef(Start_Shoot_Task, Shoot_Task, osPriorityAboveNormal, 0, 1024, Start_Shoot_TaskBuffer, &Start_Shoot_TaskControlBlock);
-  Start_Shoot_TaskHandle = osThreadCreate(osThread(Start_Shoot_Task), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   osThreadStaticDef(Start_Gimbal_Task, Gimbal_Task, osPriorityAboveNormal, 0, 1024, Gimbal_TaskBuffer, &Gimbal_TaskControlBlock);
   gimbal_task_handle = osThreadCreate(osThread(Start_Gimbal_Task), NULL);
   
-#if BOARD_ROLE == 1
-  /* 超电与裁判系统均在底盘板；0x52 反馈设备初始化成功后创建任务。 */
+  /* 超电本地执行；裁判快照通过 CAN3 接收。 */
   if (supercapInit()) {
-    osThreadStaticDef(SUPERPOWER, superpower_task, osPriorityAboveNormal, 0, 256, ERPOWER_TaskBuffer, &SUPERPOWER_TaskControlBlock);
+    osThreadStaticDef(SUPERPOWER, superpower_task, osPriorityAboveNormal, 0, 256, SUPERPOWER_TaskBuffer, &SUPERPOWER_TaskControlBlock);
     superpower_handle = osThreadCreate(osThread(SUPERPOWER), NULL);
     if (superpower_handle == NULL) {
       Error_Handler();
     }
   }
-#endif
   /* 静态任务声明 */
-#if BOARD_ROLE == 1
-  osThreadStaticDef(REFEREE, referee_task, osPriorityNormal, 0, 512, REFEREE_TaskBuffer, &REFEREE_TaskControlBlock);
-  referee_usart_task_handle = osThreadCreate(osThread(REFEREE), NULL);
-#endif
 
-#if BOARD_ROLE == 2
-  osThreadStaticDef(USB, usb_task, osPriorityNormal, 0, 1024, USB_TaskBuffer, &USB_TaskControlBlock);
-  usb_task_handle = osThreadCreate(osThread(USB), NULL);
-#endif
 
   osThreadStaticDef(BoardLink, BoardLink_Task, osPriorityAboveNormal, 0, 512, BoardLink_TaskBuffer, &BoardLink_TaskControlBlock);
   BoardLink_TaskHandle = osThreadCreate(osThread(BoardLink), NULL);

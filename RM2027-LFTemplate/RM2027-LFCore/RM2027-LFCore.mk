@@ -18,6 +18,16 @@ $(wildcard $(CORE_DIR)/3_LuojiaFox/*.cpp) \
 $(wildcard $(CORE_DIR)/3_LuojiaFox/*/*.cpp) \
 $(wildcard $(CORE_DIR)/core_template.cpp)
 
+# subControl is an execution-only image. Keep unused master sources as reference.
+CPP_SOURCES := $(filter-out \
+$(CORE_DIR)/2_Device/Communication/dvc_communication.cpp \
+$(CORE_DIR)/2_Device/RC/remote_control.cpp \
+$(CORE_DIR)/2_Device/USB/usb.cpp \
+$(CORE_DIR)/4_Application/Chassis/chassis_command.cpp \
+$(CORE_DIR)/4_Application/Gimbal/app_gimbal_small_yaw.cpp \
+$(wildcard $(CORE_DIR)/4_Application/Shoot/*.cpp) \
+$(wildcard $(CORE_DIR)/4_Application/Referee/*.cpp),$(CPP_SOURCES))
+
 C_SOURCES += \
 $(wildcard $(CORE_DIR)/1_Middleware/*/*.c) \
 $(wildcard $(CORE_DIR)/1_Middleware/*/*/*.c)
