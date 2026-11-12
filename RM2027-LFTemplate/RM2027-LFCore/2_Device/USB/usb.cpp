@@ -526,9 +526,12 @@ void Usb::SendGameStatus(void)
  */
 void Usb::SendRobotMotion(void)
 {
-    LuojiaFox::ChassisState fdb_speed_vector = LuojiaFox::system_state.read().chassis;
+    const auto fdb_speed_vector = LuojiaFox::system_state.read().chassis;
+    // RobotMotion has no validity bit; do not turn stale feedback into a new sample.
+    if (!fdb_speed_vector.valid || HAL_GetTick() - fdb_speed_vector.last_update_ms >=
+        board_link::can3::kChassisFeedbackTimeoutMs) { return; }
 
-    send_robot_motion.time_stamp = HAL_GetTick();
+    send_robot_motion.time_stamp = fdb_speed_vector.last_update_ms;
 
     send_robot_motion.data.speed_vector.vx = fdb_speed_vector.vx;
     send_robot_motion.data.speed_vector.vy = fdb_speed_vector.vy;

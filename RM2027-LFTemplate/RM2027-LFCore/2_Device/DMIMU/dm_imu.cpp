@@ -69,7 +69,8 @@ void onCanFrame(FDCAN_HandleTypeDef* bus, const FDCAN_RxHeaderTypeDef* header,
     imu.received_mask |= 1U << (QUAT_DATA - data[0]);
     imu.last_rx_ms = HAL_GetTick();
     if (data[0] == EULER_DATA) { imu.euler_rx_ms = imu.last_rx_ms; }
-    if (data[0] == GYRO_DATA) { imu.gyro_rx_ms = imu.last_rx_ms; }
+    if (data[0] == GYRO_DATA) { imu.gyro_rx_ms = imu.last_rx_ms; ++imu.gyro_revision; }
+    if (data[0] == ACCEL_DATA) { imu.accel_rx_ms = imu.last_rx_ms; }
 }
 
 bool sendCommand(uint8_t reg_id, uint8_t action, uint32_t value)

@@ -93,6 +93,8 @@ typedef struct
 	uint32_t last_rx_ms; // 最近一帧有效测量的主控时间
 	uint32_t euler_rx_ms;
 	uint32_t gyro_rx_ms;
+	uint32_t accel_rx_ms;
+	uint32_t gyro_revision; // increments on each received gyro report
 
 }imu_t;
 

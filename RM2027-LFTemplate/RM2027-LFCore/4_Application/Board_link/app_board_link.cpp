@@ -15,16 +15,6 @@ using namespace can3;
 
 constexpr uint32_t kChassisSourceTimeoutMs = 10U;
 
-// 枪口仅主动上报欧拉角与角速度，各 1 kHz，板载 BMI088 不占用 CAN3。
-constexpr uint32_t kWorstCaseBitsPerSecond =
-    2U * 1000U * kMaxFrameBits +
-    3U * 1000U / kCommandPeriodMs * kMaxFrameBits +
-    1000U / kBigYawFeedbackPeriodMs * maxFrameBits(sizeof(BigYawFeedbackFrame)) +
-    1000U / kChassisFeedbackPeriodMs * maxFrameBits(sizeof(ChassisFeedbackFrame)) +
-    1000U / kGimbalOffsetPeriodMs * maxFrameBits(sizeof(GimbalOffsetFrame));
-static_assert(kGimbalOffsetPeriodMs % kCommandPeriodMs == 0U, "CAN3 offset period must align");
-static_assert(kWorstCaseBitsPerSecond <= kBitrate * 75U / 100U, "CAN3 frame budget exceeds 75 percent");
-
 BigYawTarget g_yaw_target{};
 ChassisTarget g_chassis_target{};
 
@@ -59,23 +49,6 @@ void sendYaw(uint32_t now, const BigYawTarget& target, bool peer_online, uint8_t
         yaw.velocity = encodeSigned(target.velocity_rad_s, kYawSpeedScale);
     }
     can3::send(yaw);
-}
-
-void sendOffset(uint32_t now, const BigYawTarget& target, bool peer_online, uint8_t sequence) {
-    const bool fresh = now - target.updated_at_ms < kBigYawTimeoutMs;
-    GimbalOffsetFrame offset{};
-    offset.flags = kVersion;
-    offset.sequence = sequence;
-    if (fresh && peer_online && target.big_yaw_offset_valid &&
-        std::isfinite(target.big_yaw_to_chassis_rad)) {
-        offset.flags |= kBigYawOffsetValid;
-        offset.big_yaw_to_chassis = encodeSigned(target.big_yaw_to_chassis_rad, kAngleScale);
-        if (target.muzzle_offset_valid && std::isfinite(target.muzzle_to_chassis_rad)) {
-            offset.flags |= kGimbalOffsetValid;
-            offset.muzzle_to_chassis = encodeSigned(target.muzzle_to_chassis_rad, kAngleScale);
-        }
-    }
-    can3::send(offset);
 }
 
 void sendChassis(uint32_t now, const ChassisTarget& target, bool peer_online, uint8_t sequence) {
@@ -116,9 +89,8 @@ void sendReferee(uint8_t sequence) {
     can3::send(frame);
 }
 
-void exchangeTargets(bool send_offset) {
+void exchangeTargets() {
     static uint8_t command_sequence = 0U;
-    static uint8_t offset_sequence = 0U;
 
     taskENTER_CRITICAL();
     auto chassis_target = g_chassis_target;
@@ -156,16 +128,15 @@ void exchangeTargets(bool send_offset) {
     sendYaw(now, yaw_target, peer_online, sequence);
     sendChassis(now, chassis_target, peer_online, sequence);
     sendReferee(sequence);
-    if (send_offset) { sendOffset(now, yaw_target, peer_online, offset_sequence++); }
-    const auto chassis_rx = can3::readChassisFeedback();
+    const auto& chassis_rx = feedback;
     LuojiaFox::ChassisState chassis_state{};
     chassis_state.last_update_ms = chassis_rx.rx_ms;
     chassis_state.valid = chassis_rx.fresh(now, kChassisFeedbackTimeoutMs) &&
         (chassis_rx.data.flags & kChassisFeedbackValid);
     if (chassis_state.valid) {
-        chassis_state.vx = chassis_rx.data.vx / kSpeedScale;
-        chassis_state.vy = chassis_rx.data.vy / kSpeedScale;
-        chassis_state.wz = chassis_rx.data.wz / kSpeedScale;
+        chassis_state.vx = chassis_rx.data.vx / kFeedbackSpeedScale;
+        chassis_state.vy = chassis_rx.data.vy / kFeedbackSpeedScale;
+        chassis_state.wz = chassis_rx.data.wz / kFeedbackSpeedScale;
     }
     LuojiaFox::system_state.updateChassis(chassis_state);
     can3::updateBusLoad(now);
@@ -189,8 +160,8 @@ bool getPeerBigYawFeedback(BigYawFeedback& feedback) {
     const bool fresh = received.fresh(HAL_GetTick(), kBigYawTimeoutMs);
     const auto& frame = received.data;
     const bool valid = fresh && (frame.flags & kBigYawFeedbackValid) &&
-                       frame.joint >= -31416 && frame.joint <= 31416;
-    feedback = {frame.joint / kAngleScale, valid, valid && (frame.flags & kBigYawFeedbackReady),
+                       frame.joint >= -7854 && frame.joint <= 7854;
+    feedback = {frame.joint / kFeedbackAngleScale, valid, valid && (frame.flags & kBigYawFeedbackReady),
                 valid && (frame.flags & kBigYawFeedbackSlow), received.revision, received.rx_ms};
     return fresh;
 }
@@ -212,10 +183,8 @@ extern "C" void BoardLink_Task(void const* argument) {
     using namespace board_link::can3;
     const TickType_t delay = pdMS_TO_TICKS(kCommandPeriodMs);
     configASSERT(delay > 0U);
-    uint32_t phase_ms = 0U;
     for (;;) {
-        board_link::exchangeTargets(phase_ms == 0U);
-        phase_ms = (phase_ms + kCommandPeriodMs) % kGimbalOffsetPeriodMs;
+        board_link::exchangeTargets();
         // 延误后从当前时刻继续，避免补发积压的周期帧。
         vTaskDelay(delay);
     }

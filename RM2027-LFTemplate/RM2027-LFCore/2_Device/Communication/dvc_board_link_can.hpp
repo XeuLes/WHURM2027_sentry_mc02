@@ -16,7 +16,6 @@ struct TxDebugState {
     uint32_t last_tx_ms;
     can3::ChassisTargetFrame last_chassis_payload;
     can3::BigYawTargetFrame last_yaw_payload;
-    can3::GimbalOffsetFrame last_offset_payload;
     can3::RefereePowerFrame last_referee_payload;
 };
 
@@ -35,8 +34,7 @@ template<class Frame> struct ReceivedFeedback {
         return seen && now - rx_ms < timeout;
     }
 };
-using ReceivedYawFeedback = ReceivedFeedback<BigYawFeedbackFrame>;
-using ReceivedChassisFeedback = ReceivedFeedback<ChassisFeedbackFrame>;
+using ReceivedBoardFeedback = ReceivedFeedback<FeedbackValues>;
 
 struct LoadDebugState {
     uint32_t sample_ms;
@@ -52,13 +50,11 @@ struct LoadDebugState {
 extern LoadDebugState g_can3_load;
 
 bool init();
-ReceivedYawFeedback readFeedback();
-ReceivedChassisFeedback readChassisFeedback();
+ReceivedBoardFeedback readFeedback();
 void updateBusLoad(uint32_t now_ms);
 
 bool send(const ChassisTargetFrame& frame);
 bool send(const BigYawTargetFrame& frame);
-bool send(const GimbalOffsetFrame& frame);
 bool send(const RefereePowerFrame& frame);
 
 } // namespace can3

@@ -27,7 +27,7 @@
 #include "lf_core.hpp"
 #include "tim.h"
 
-#include "dm_imu.hpp"
+#include "app_muzzle_ins.hpp"
 
 #include <cmath>
 
@@ -156,26 +156,6 @@ static void BMI088_Warm_Calib_Update(void);
   * @retval None
   */
 /* USER CODE END Header_INS_Task */
-static void publishMuzzleImu()
-{
-    constexpr uint8_t required = (1U << (QUAT_DATA - EULER_DATA)) |
-                                 (1U << (QUAT_DATA - GYRO_DATA));
-    imu_t sample{};
-    if (!dm_imu_get_data(&sample) || (sample.received_mask & required) != required) {
-        return;
-    }
-    const uint32_t now = HAL_GetTick();
-    const uint32_t oldest_tick = (now - sample.euler_rx_ms >= now - sample.gyro_rx_ms)
-        ? sample.euler_rx_ms : sample.gyro_rx_ms;
-    LuojiaFox::system_state.updateMuzzleImu({
-        sample.yaw, sample.pitch, sample.roll,
-        sample.gyro[2] * RADIANS_TO_DEGREES,
-        sample.gyro[0] * RADIANS_TO_DEGREES,
-        sample.gyro[1] * RADIANS_TO_DEGREES,
-        0.0f, 0.0f, false, oldest_tick
-    });
-}
-
 extern "C" void INS_Task(void const* argument) {
     /* USER CODE BEGIN INS_Task */
 
@@ -290,7 +270,7 @@ extern "C" void INS_Task(void const* argument) {
               ins_info.accel_valid,
               HAL_GetTick() }
         );
-        publishMuzzleImu();
+        muzzle_ins::update();
 
         /* 温控每 5 ms 跑一次，与 PID 初始化时的 dt = 0.005f 对应 */
         if (++heater_div >= 5) {
