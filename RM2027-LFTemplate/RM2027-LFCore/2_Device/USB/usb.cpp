@@ -32,6 +32,9 @@
 #include "referee.hpp"
 #include "lf_core.hpp"
 #include "board_link_can.hpp"
+#include "app_board_link.hpp"
+#include "app_chassis.h"
+#include "chassis_config.hpp"
 
 
 #define USB_LINK_TIMEOUT_MS 100  // ms
@@ -55,10 +58,10 @@
 #define SEND_DURATION_SentryInfo   10// ms
 #define SEND_DURATION_MapCommand 10 // ms
 #define SEND_DURATION_InitSpeed 10 // ms
+#define SEND_DURATION_NavigationStatus 50 // ms
 
 // clang-format on
 
-#define USB_RECEIVE_LEN 150   // byte
 #define HEADER_SIZE 4         // byte
 
 #define CheckDurationAndSend(send_name)                                                  \
@@ -107,6 +110,7 @@ void Usb::Update(void)
  */
 void Usb::Init(void)
 {
+    rx_size = 0U;
     // 数据置零
     memset(&last_send_time, 0, sizeof(LastSendTime_t));
     memset(&receive_robot_cmd, 0, sizeof(ReceiveDataRobotCmd_s));
@@ -260,6 +264,12 @@ void Usb::Init(void)
         (uint8_t *)(&send_init_speed.frame_header),
         sizeof(send_init_speed.frame_header));
 
+    send_navigation_status.frame_header.sof = SEND_SOF;
+    send_navigation_status.frame_header.len = sizeof(SendDataNavigationStatus_s) - 6;
+    send_navigation_status.frame_header.id = NAVIGATION_STATUS_SEND_ID;
+    append_CRC8_check_sum(
+        reinterpret_cast<uint8_t*>(&send_navigation_status.frame_header),
+        sizeof(send_navigation_status.frame_header));
 }
 
 /**
@@ -269,6 +279,9 @@ void Usb::Init(void)
  */
 void Usb::SendAll(void)
 {
+    if (HAL_GetTick() - last_send_time.NavigationStatus >= SEND_DURATION_NavigationStatus) {
+        SendNavigationStatus();
+    }
     // 发送Debug数据
     CheckDurationAndSend(Debug);
     // 发送Imu数据
@@ -311,93 +324,65 @@ void Usb::SendAll(void)
  */
 void Usb::Receive(void)
 {
-    static uint32_t len = USB_RECEIVE_LEN;
-    static uint8_t * rx_data_start_address = rx_buf;  // 接收数据包时存放于缓存区的起始位置
-    static uint8_t * rx_data_end_address;  // 接收数据包时存放于缓存区的结束位置
-    uint8_t * sof_address = rx_buf;
-
-    // 计算数据包的结束位置
-    rx_data_end_address = rx_data_start_address + USB_RECEIVE_LEN;
-    // 读取数据
-    USB_Receive(rx_data_start_address, &len);  // Read data into the buffer
-
-    while (sof_address <= rx_data_end_address) {  // 解析缓冲区中的所有数据包
-        // 寻找帧头位置
-        while (*(sof_address) != RECEIVE_SOF && (sof_address <= rx_data_end_address)) {
-            sof_address++;
+    uint32_t received = sizeof(rx_buf) - rx_size;
+    if (USB_Receive(rx_buf + rx_size, &received) != USBD_OK) {
+        rx_size = 0U;
+        return;
+    }
+    rx_size += received;
+    uint32_t consumed = 0U;
+    while (rx_size - consumed >= HEADER_SIZE) {
+        uint8_t* frame = rx_buf + consumed;
+        if (frame[0] != RECEIVE_SOF || !verify_CRC8_check_sum(frame, HEADER_SIZE)) {
+            ++consumed;
+            continue;
         }
-        // 判断是否超出接收数据范围
-        if (sof_address > rx_data_end_address) {
-            break;  // 退出循环
+        const uint32_t frame_size = HEADER_SIZE + frame[1] + sizeof(uint16_t);
+        const uint8_t id = frame[2];
+        const bool known_size =
+            (id == ROBOT_CMD_DATA_RECEIVE_ID && frame_size == sizeof(receive_robot_cmd)) ||
+            (id == PID_DEBUG_DATA_RECEIVE_ID && frame_size == sizeof(receive_pid_debug)) ||
+            (id == VIRTUAL_RC_DATA_RECEIVE_ID && frame_size == sizeof(receive_virtual_rc)) ||
+            (id == SENTRY_CMD_RECEIVE_ID && frame_size == sizeof(receive_sentry_cmd));
+        if (!known_size || frame_size > sizeof(rx_buf)) {
+            ++consumed;
+            continue;
         }
-        // 检查CRC8校验
-        bool crc8_ok = verify_CRC8_check_sum(sof_address, HEADER_SIZE);
-        if (crc8_ok) {
-            uint8_t data_len = sof_address[1];
-            uint8_t data_id = sof_address[2];
-            // 检查整包CRC16校验 4: header size, 2: crc16 size
-            bool crc16_ok = verify_CRC16_check_sum(sof_address, 4 + data_len + 2);
-            if (crc16_ok) {
-                switch (data_id) {
-                    case ROBOT_CMD_DATA_RECEIVE_ID: {
-                        const auto frame_size = HEADER_SIZE + data_len + sizeof(uint16_t);
-                        const bool legacy = frame_size ==
-                            sizeof(receive_robot_cmd) - sizeof(receive_robot_cmd.gimbal_cmd);
-                        if (!legacy && frame_size != sizeof(receive_robot_cmd)) { break; }
-
-                        uint32_t command_timestamp;
-                        memcpy(&command_timestamp, &sof_address[4], sizeof(command_timestamp));
-                        if (has_robot_cmd_timestamp &&
-                            static_cast<int32_t>(command_timestamp - latest_robot_cmd_timestamp) <= 0) {
-                            break;
-                        }
-
-                        memcpy(&receive_robot_cmd, sof_address, frame_size - sizeof(uint16_t));
-                        if (legacy) {
-                            receive_robot_cmd.gimbal_cmd = 0U;
-                        } else if (receive_robot_cmd.gimbal_cmd > 1U) {
-                            break;
-                        }
-                        latest_robot_cmd_timestamp = command_timestamp;
-                        has_robot_cmd_timestamp = true;
-                        UpdateRobotCmd();
-                        receive_time = robot_cmd_receive_time;
-                    } break;
-                    case PID_DEBUG_DATA_RECEIVE_ID: {
-                        memcpy(&receive_pid_debug, sof_address, sizeof(ReceiveDataPidDebug_s));
-                    } break;
-                    case VIRTUAL_RC_DATA_RECEIVE_ID: {
-                        memcpy(
-                            &receive_virtual_rc, sof_address, sizeof(ReceiveDataVirtualRc_s));
-                    } break;
-                    case SENTRY_CMD_RECEIVE_ID: {
-                        memcpy(
-                            &receive_sentry_cmd, sof_address, sizeof(ReceiveDataSentryCmd_s));
-                    } break;
-                    default:
-                        break;
-                }
-                if (*((uint32_t *)(&sof_address[4])) > latest_rx_timestamp) {
-                    latest_rx_timestamp = *((uint32_t *)(&sof_address[4]));
-                    receive_time = HAL_GetTick();
-                }
-            }
-            sof_address += (data_len + HEADER_SIZE + 2);
-        } else {  //CRC8校验失败，移动到下一个字节
-            sof_address++;
+        if (rx_size - consumed < frame_size) { break; }
+        if (!verify_CRC16_check_sum(frame, frame_size)) {
+            ++consumed;
+            continue;
+        }
+        consumed += frame_size;
+        uint32_t timestamp;
+        memcpy(&timestamp, frame + HEADER_SIZE, sizeof(timestamp));
+        switch (id) {
+        case ROBOT_CMD_DATA_RECEIVE_ID: {
+            ReceiveDataRobotCmd_s candidate{};
+            memcpy(&candidate, frame, sizeof(candidate));
+            if (!AcceptRobotCmd(candidate)) { continue; }
+            receive_time = robot_cmd_receive_time;
+            break;
+        }
+        case PID_DEBUG_DATA_RECEIVE_ID:
+            memcpy(&receive_pid_debug, frame, frame_size);
+            break;
+        case VIRTUAL_RC_DATA_RECEIVE_ID:
+            memcpy(&receive_virtual_rc, frame, frame_size);
+            break;
+        case SENTRY_CMD_RECEIVE_ID:
+            memcpy(&receive_sentry_cmd, frame, frame_size);
+            break;
+        default:
+            break;
+        }
+        if (timestamp > latest_rx_timestamp) {
+            latest_rx_timestamp = timestamp;
+            receive_time = HAL_GetTick();
         }
     }
-    // 更新下一次接收数据的起始位置
-    if (sof_address > rx_data_start_address + USB_RECEIVE_LEN) {
-        // 缓冲区中没有剩余数据，下次接收数据的起始位置为缓冲区的起始位置
-        rx_data_start_address = rx_buf;
-    } else {
-        uint16_t remaining_data_len = USB_RECEIVE_LEN - (sof_address - rx_data_start_address);
-        // 缓冲区中有剩余数据，下次接收数据的起始位置为缓冲区中剩余数据的起始位置
-        rx_data_start_address = rx_buf + remaining_data_len;
-        // 将剩余数据移到缓冲区的起始位置
-        memcpy(rx_buf, sof_address, remaining_data_len);
-    }
+    rx_size -= consumed;
+    memmove(rx_buf, rx_buf + consumed, rx_size);
 }
 
 /*******************************************************************************/
@@ -630,9 +615,9 @@ void Usb::SendJointState(void)
 {
     const auto state = LuojiaFox::system_state.read().gimbal;
     const uint32_t now = HAL_GetTick();
-    if (!state.online ||
-        now - state.updated_at_ms >= 20U) { return; }
-    send_joint_state.time_stamp = now;
+    if (!state.online || now - state.updated_at_ms >= GIMBAL_IMU_TIMEOUT_MS ||
+        !isfinite(state.joint_pitch_rad) || !isfinite(state.joint_yaw_rad)) { return; }
+    send_joint_state.time_stamp = state.updated_at_ms;
     send_joint_state.data.pitch = state.joint_pitch_rad;
     send_joint_state.data.yaw = state.joint_yaw_rad;
     append_CRC16_check_sum((uint8_t *)&send_joint_state, sizeof(SendDataJointState_s));
@@ -698,10 +683,115 @@ void Usb::SendInitSpeed(void)
     USB_Transmit((uint8_t *)&send_init_speed, sizeof(SendInitSpeed_s));
 }
 
+void Usb::SendNavigationStatus(void)
+{
+    using LuojiaFox::GimbalShape;
+    using LuojiaFox::GimbalTransformState;
+    const uint32_t now = HAL_GetTick();
+    const auto state = LuojiaFox::system_state.read();
+    const auto& imu = state.imu;
+    const auto& joints = state.gimbal;
+    const auto power = referee.GetPowerSupplySnapshot();
+    board_link::BigYawFeedback big_yaw{};
+    board_link::getPeerBigYawFeedback(big_yaw);
+
+    send_navigation_status.time_stamp = now;
+    auto& data = send_navigation_status.data;
+    data = {};
+    data.session = receive_robot_cmd.data.navigation.session;
+    data.command_time_stamp = receive_robot_cmd.time_stamp;
+    data.transformed = static_cast<uint8_t>(joints.transformed);
+
+    const bool imu_valid = imu.last_update_ms != 0U &&
+        now - imu.last_update_ms < GIMBAL_IMU_TIMEOUT_MS &&
+        isfinite(imu.yaw_deg) && isfinite(imu.pitch_deg) && isfinite(imu.roll_deg);
+    if (imu_valid) {
+        constexpr float radians_per_degree = 0.017453292519943295f;
+        data.flags |= NAV_STATUS_IMU_VALID;
+        data.main_imu = {imu.last_update_ms, imu.yaw_deg * radians_per_degree};
+    }
+    if (big_yaw.motor_online && isfinite(big_yaw.joint_rad)) {
+        data.flags |= NAV_STATUS_BIG_YAW_VALID;
+        data.big_yaw = {big_yaw.rx_ms, big_yaw.joint_rad};
+    }
+    const bool joints_valid = joints.online && now - joints.updated_at_ms < GIMBAL_IMU_TIMEOUT_MS &&
+        isfinite(joints.joint_yaw_rad) && isfinite(joints.joint_pitch_rad) && isfinite(joints.joint_roll_rad);
+    if (power.online) {
+        data.flags |= NAV_STATUS_REFEREE_ONLINE;
+        if (power.power_received && now - power.power_tick < 1000U) {
+            data.flags |= NAV_STATUS_POWER_VALID;  // 功率值由 RobotStatus 上报
+        }
+        if (power.buffer_received && now - power.buffer_tick < 1000U) {
+            data.flags |= NAV_STATUS_BUFFER_VALID;
+            data.buffer_energy_j = power.buffer_energy_j;
+        }
+    }
+
+    const auto& cmd = state.robot_cmd;
+    const bool motion_valid = state.chassis.valid &&
+        now - state.chassis.last_update_ms < board_link::can3::kChassisFeedbackTimeoutMs;
+    auto transform_state = joints.transform_state;
+    if (Chassis_GetMode() != CHASSIS_MODE_AUTO_VISION || !cmd.chassis_enabled ||
+        cmd.last_update_ms == 0U || now - cmd.last_update_ms >= chassis_app::kAutoCommandTimeoutMs) {
+        transform_state = GimbalTransformState::Disabled;
+    } else if (transform_state != GimbalTransformState::Fault &&
+               (!motion_valid || !joints_valid || !big_yaw.ready ||
+                (cmd.passage_requested && (!cmd.heading_valid || !imu_valid)))) {
+        transform_state = GimbalTransformState::Recovering;
+    } else if (transform_state == GimbalTransformState::Ready) {
+        // The command may change before the gimbal task publishes its next state.
+        const auto requested_shape = cmd.passage_requested ? GimbalShape::Folded : GimbalShape::Upright;
+        if (joints.transformed != requested_shape) {
+            transform_state = cmd.passage_requested
+                ? GimbalTransformState::Preparing : GimbalTransformState::Restoring;
+        }
+    }
+    data.transform_state = static_cast<uint8_t>(transform_state);
+
+    auto* bytes = reinterpret_cast<uint8_t*>(&send_navigation_status);
+    append_CRC16_check_sum(bytes, sizeof(send_navigation_status));
+    if (USB_Transmit(bytes, sizeof(send_navigation_status)) == USBD_OK) {
+        last_send_time.NavigationStatus = now;
+    }
+}
+
 
 /*******************************************************************************/
 /* Receive Function                                                            */
 /*******************************************************************************/
+
+
+bool Usb::AcceptRobotCmd(const ReceiveDataRobotCmd_s& frame)
+{
+    const auto& nav = frame.data.navigation;
+    const auto& speed = frame.data.speed_vector;
+    const bool chassis_enabled = (nav.flags & ROBOT_CMD_CHASSIS_ENABLED) != 0U;
+    const bool heading_valid = (nav.flags & ROBOT_CMD_HEADING_VALID) != 0U;
+    const bool aim_valid = (nav.flags & ROBOT_CMD_AIM_VALID) != 0U;
+    constexpr uint8_t allowed_flags =
+        ROBOT_CMD_CHASSIS_ENABLED | ROBOT_CMD_HEADING_VALID | ROBOT_CMD_AIM_VALID;
+    if (nav.session == 0U || (nav.flags & ~allowed_flags) != 0 ||
+        nav.mode > ROBOT_CMD_NAV_UPRIGHT ||
+        (chassis_enabled && nav.mode == ROBOT_CMD_NAV_FOLD && !heading_valid) ||
+        !isfinite(speed.vx) || !isfinite(speed.vy) || !isfinite(speed.wz) ||
+        (heading_valid && (!isfinite(nav.heading) || fabsf(nav.heading) > 3.141593f)) ||
+        (aim_valid && (!isfinite(frame.data.gimbal.yaw) || !isfinite(frame.data.gimbal.pitch)))) {
+        return false;
+    }
+    if (nav.session != receive_robot_cmd.data.navigation.session) {
+        // A host restart establishes a session with a neutral command.
+        if (nav.flags != 0U || nav.mode != ROBOT_CMD_NAV_NORMAL ||
+            speed.vx != 0.0f || speed.vy != 0.0f || speed.wz != 0.0f ||
+            frame.data.shoot.fire != 0U || frame.data.shoot.fric_on != 0U) {
+            return false;
+        }
+    } else if (static_cast<int32_t>(frame.time_stamp - receive_robot_cmd.time_stamp) <= 0) {
+        return false;
+    }
+    receive_robot_cmd = frame;
+    UpdateRobotCmd();
+    return true;
+}
 
 void Usb::UpdateRobotCmd(void)
 {
@@ -718,13 +808,21 @@ void Usb::UpdateRobotCmd(void)
     robot_cmd.chassis.roll = receive_robot_cmd.data.chassis.roll;
     robot_cmd.chassis.leg_length = receive_robot_cmd.data.chassis.leg_lenth;
 
-    const float yaw_target = receive_robot_cmd.data.gimbal.yaw;
-    const float pitch_target = receive_robot_cmd.data.gimbal.pitch;
-    const bool aim_finite = isfinite(yaw_target) && isfinite(pitch_target);
-    cmd.passage_requested = receive_robot_cmd.gimbal_cmd == 1U;
-    if (aim_finite) {
+    const auto& nav = receive_robot_cmd.data.navigation;
+    cmd.chassis_enabled = (nav.flags & ROBOT_CMD_CHASSIS_ENABLED) != 0U;
+    cmd.heading_valid = (nav.flags & ROBOT_CMD_HEADING_VALID) != 0U;
+    cmd.big_yaw_heading_rad = cmd.heading_valid ? nav.heading : 0.0f;
+    cmd.passage_requested = state.robot_cmd.passage_requested;
+    if (cmd.chassis_enabled && nav.mode == ROBOT_CMD_NAV_FOLD) { cmd.passage_requested = true; }
+    if (cmd.chassis_enabled && nav.mode == ROBOT_CMD_NAV_UPRIGHT) { cmd.passage_requested = false; }
+
+    const bool aim_valid = (nav.flags & ROBOT_CMD_AIM_VALID) != 0U;
+    const float yaw_target = aim_valid ? receive_robot_cmd.data.gimbal.yaw : 0.0f;
+    const float pitch_target = aim_valid ? receive_robot_cmd.data.gimbal.pitch : 0.0f;
+    if (aim_valid) {
         // Aim activity follows changes in the received target.
-        const bool changed = yaw_target != robot_cmd.gimbal.yaw ||
+        const bool changed = state.robot_cmd.gimbal_aim_changed_ms == 0U ||
+                             yaw_target != robot_cmd.gimbal.yaw ||
                              pitch_target != robot_cmd.gimbal.pitch;
         cmd.gimbal_aim_changed_ms = changed ? robot_cmd_receive_time :
                                              state.robot_cmd.gimbal_aim_changed_ms;

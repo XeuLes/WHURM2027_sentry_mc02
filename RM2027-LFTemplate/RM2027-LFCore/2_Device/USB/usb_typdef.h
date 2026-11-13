@@ -29,6 +29,7 @@
 #define SENTRYINFO_SEND_ID        ((uint8_t)0x0E)
 #define MAP_COMMAND_SEND_ID       ((uint8_t)0x0F)
 #define INIT_SPEED_SEND_ID        ((uint8_t)0x10)
+#define NAVIGATION_STATUS_SEND_ID ((uint8_t)0x21)
 
 #define ROBOT_CMD_DATA_RECEIVE_ID  ((uint8_t)0x01)
 #define PID_DEBUG_DATA_RECEIVE_ID  ((uint8_t)0x02)
@@ -224,7 +225,7 @@ typedef struct
 // 地面机器人位置数据包
 typedef struct
 {
-    FrameHeader_t frame_header;  // 数据段id = 0x08
+    FrameHeader_t frame_header;  // 数据段id = 0x09
     uint32_t time_stamp;
     
     struct
@@ -250,7 +251,7 @@ typedef struct
 // 机器人运动数据包
 typedef struct
 {
-    FrameHeader_t frame_header;  // 数据段id = 0x09
+    FrameHeader_t frame_header;  // 数据段id = 0x08
     uint32_t time_stamp;
     struct
     {
@@ -410,8 +411,56 @@ typedef struct
     uint16_t crc;
 } __packed__ SendInitSpeed_s;
 
+enum {
+    NAV_STATUS_IMU_VALID      = 1U << 0,
+    NAV_STATUS_BIG_YAW_VALID  = 1U << 1,
+    NAV_STATUS_POWER_VALID    = 1U << 2,
+    NAV_STATUS_BUFFER_VALID   = 1U << 3,
+    NAV_STATUS_REFEREE_ONLINE = 1U << 4,
+};
+
+// 导航补充反馈。底盘速度、小 Yaw/Pitch 关节及其他裁判数据使用现有发送帧。
+typedef struct
+{
+    FrameHeader_t frame_header;  // 数据段id = 0x21
+    uint32_t time_stamp;
+    struct
+    {
+        uint8_t transform_state;
+        uint8_t transformed;
+        uint8_t flags;
+        uint32_t session;
+        uint32_t command_time_stamp;
+        struct
+        {
+            uint32_t time_stamp;
+            float yaw;
+        } __packed__ main_imu;   // 大 Yaw 上的主控 BMI088 惯性航向，rad
+        struct
+        {
+            uint32_t time_stamp;
+            float angle;
+        } __packed__ big_yaw;    // 大 Yaw 相对底盘的机械角，rad
+        uint16_t buffer_energy_j;
+    } __packed__ data;
+    uint16_t crc;
+} __packed__ SendDataNavigationStatus_s;
 
 /*-------------------- Receive --------------------*/
+enum {
+    ROBOT_CMD_CHASSIS_ENABLED = 1U << 0,
+    ROBOT_CMD_HEADING_VALID    = 1U << 1,
+    ROBOT_CMD_AIM_VALID        = 1U << 2,
+};
+
+enum {
+    ROBOT_CMD_NAV_NORMAL = 0,
+    ROBOT_CMD_NAV_SLOW_SPIN = 1,
+    ROBOT_CMD_NAV_FAST_SPIN = 2,
+    ROBOT_CMD_NAV_FOLD = 3,
+    ROBOT_CMD_NAV_UPRIGHT = 4,
+};
+
 typedef struct RobotCmdData
 {
     FrameHeader_t frame_header;  // 数据段id = 0x01
@@ -423,7 +472,7 @@ typedef struct RobotCmdData
             float vx;
             float vy;
             float wz;
-        } __packed__ speed_vector;
+        } __packed__ speed_vector;  // chassis_link，m/s、m/s、rad/s
         struct
         {
             float roll;
@@ -441,10 +490,21 @@ typedef struct RobotCmdData
             uint8_t fire;
             uint8_t fric_on;
         } __packed__ shoot;
+        struct
+        {
+            uint8_t mode;    // ROBOT_CMD_NAV_*
+            uint8_t flags;   // ROBOT_CMD_* 有效位
+            uint32_t session;
+            float heading;   // 主控 BMI088 惯性参考系内的大 Yaw 绝对航向，rad
+        } __packed__ navigation;
     } __packed__ data;
-    uint8_t gimbal_cmd;  // 可选尾字段，0 普通，1 过洞
     uint16_t checksum;
 } __packed__ ReceiveDataRobotCmd_s;
+
+#ifdef __cplusplus
+static_assert(sizeof(ReceiveDataRobotCmd_s) == 58, "RobotCmd wire size");
+static_assert(sizeof(SendDataNavigationStatus_s) == 39, "navigation status wire size");
+#endif
 
 // PID调参数据包
 typedef struct

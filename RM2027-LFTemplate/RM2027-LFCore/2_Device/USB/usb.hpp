@@ -45,6 +45,7 @@ typedef struct
     uint32_t SentryInfo;
     uint32_t MapCommand;
     uint32_t InitSpeed;
+    uint32_t NavigationStatus;
 } LastSendTime_t;
 
 typedef struct  // 底盘速度向量结构体
@@ -147,13 +148,11 @@ public:
 private:
     /* 链路状态  */
     uint8_t rx_buf[USB_RX_DATA_SIZE];
-
+    uint32_t rx_size = 0U;
     bool offline = true;
     uint32_t receive_time = 0;
     uint32_t robot_cmd_receive_time = 0;
     uint32_t latest_rx_timestamp = 0;
-    uint32_t latest_robot_cmd_timestamp = 0;
-    bool has_robot_cmd_timestamp = false;
     uint32_t continue_receive_cnt = 0;
 
     /* 数据发送结构体 */
@@ -174,6 +173,7 @@ private:
     SendDataSentryInfo_s  send_sentry_info;
     SendDataMapCmd_s      send_map_command;
     SendInitSpeed_s       send_init_speed;
+    SendDataNavigationStatus_s send_navigation_status;
     // clang-format on
 
     /* 数据接收结构体 */
@@ -212,8 +212,10 @@ private:
     void SendSentryInfo(void);
     void SendMapCommand(void);
     void SendInitSpeed(void);
+    void SendNavigationStatus(void);
 
     /* 接收数据解包 */
+    bool AcceptRobotCmd(const ReceiveDataRobotCmd_s& frame);
     void UpdateRobotCmd(void);
     void UpdateVirtualRc(void);
     void UpdateSentryCmd(void);

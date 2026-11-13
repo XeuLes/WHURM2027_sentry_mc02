@@ -11,6 +11,7 @@ struct ChassisTarget {
     uint8_t mode;
     bool valid;
     uint32_t updated_at_ms;
+    bool motion_blocked = false;
 };
 
 struct BigYawTarget {

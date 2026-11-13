@@ -28,9 +28,10 @@ void Chassis_Control(void)
     const uint32_t now_ms = HAL_GetTick();
     const bool rc_online = !getRcOffline();
 
-    const chassis_app::ChassisCommandSelection selection =
+    const auto& robot_cmd = state.robot_cmd;
+    chassis_app::ChassisCommandSelection selection =
         chassis_app::g_chassisCommandSelector.update(
-            state.robot_cmd,
+            robot_cmd,
             rc_online,
             now_ms
         );
@@ -53,10 +54,21 @@ void Chassis_Control(void)
         }
     }
 
+    const bool automatic = selection.mode == CHASSIS_MODE_AUTO_VISION;
+    const auto requested_shape = robot_cmd.passage_requested
+        ? LuojiaFox::GimbalShape::Folded : LuojiaFox::GimbalShape::Upright;
+    const bool blocked = automatic &&
+        (state.gimbal.transform_state != LuojiaFox::GimbalTransformState::Ready ||
+         state.gimbal.transformed != requested_shape ||
+         now_ms - state.gimbal.updated_at_ms >= 20U ||
+         (robot_cmd.passage_requested && !robot_cmd.heading_valid));
+    if (blocked) {
+        selection.command.vx = selection.command.vy = selection.command.wz = 0.0f;
+    }
     const auto& command = selection.command;
     board_link::publishChassisTarget({
         command.vx, command.vy, command.wz,
-        static_cast<uint8_t>(selection.mode), command.ready, now_ms
+        static_cast<uint8_t>(selection.mode), command.ready, now_ms, blocked
     });
 }
 

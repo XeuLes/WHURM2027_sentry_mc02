@@ -23,6 +23,7 @@ struct PassageControl {
     uint32_t stage_start = 0, settled_ms = 0, entry_feedback_revision = 0;
     bool center_confirmed = false, rearmed = false;
 } passage;
+LuojiaFox::GimbalShape completed_shape = LuojiaFox::GimbalShape::Unknown;
 bool initialized = false;
 bool calibrated = false, init_failed = false;
 float scan_phase = 0;
@@ -46,6 +47,8 @@ struct ControlCycle {
     bool enable = false;
     bool imu_ok = false;
     bool passage_requested = false;
+    bool navigation_control = false;
+    bool chassis_stopped = false;
     Mode normal_mode = Mode::kZeroForce;
     bool big_yaw_centered = false;
     uint32_t big_yaw_feedback_revision = 0;
@@ -154,12 +157,33 @@ void publish(const ControlCycle& cycle) {
     state.joint_pitch_rad = g_debug.joint_pitch_rad;
     state.mode = static_cast<uint8_t>(mode);
     state.ready = g_debug.ready;
+    state.joint_roll_rad = roll.joint;
+    using LuojiaFox::GimbalShape;
+    using LuojiaFox::GimbalTransformState;
+    state.transformed = completed_shape;
+    if (mode == Mode::kFault || init_failed || passage.stage == PassageStage::kFault) {
+        state.transform_state = GimbalTransformState::Fault;
+    } else if (mode == Mode::kZeroForce || !cycle.online || !cycle.peer_online) {
+        state.transform_state = GimbalTransformState::Disabled;
+    } else if (passage.stage == PassageStage::kAlign || passage.stage == PassageStage::kFold) {
+        state.transform_state = GimbalTransformState::Preparing;
+    } else if (passage.stage == PassageStage::kUnfold) {
+        state.transform_state = GimbalTransformState::Restoring;
+    } else if (!g_debug.ready || completed_shape == GimbalShape::Unknown) {
+        state.transform_state = GimbalTransformState::Recovering;
+    } else if (cycle.navigation_control && cycle.passage_requested && completed_shape != GimbalShape::Folded) {
+        state.transform_state = GimbalTransformState::Preparing;
+    } else if (cycle.navigation_control && !cycle.passage_requested && completed_shape == GimbalShape::Folded) {
+        state.transform_state = GimbalTransformState::Restoring;
+    } else {
+        state.transform_state = GimbalTransformState::Ready;
+    }
     LuojiaFox::system_state.updateGimbal(state);
 }
 
-void selectControlRequest(ControlCycle& cycle, const LuojiaFox::RobotCmdState& aim,
+void selectControlRequest(ControlCycle& cycle, const LuojiaFox::RobotCmdState& cmd,
                           bool aux_passage) {
-    const bool robot_cmd_seen = aim.last_update_ms != 0U;
+    const bool robot_cmd_seen = cmd.last_update_ms != 0U;
     if (cycle.rc_online) {
         switch (cycle.sw) {
         case RC_SW_MID:
@@ -175,14 +199,15 @@ void selectControlRequest(ControlCycle& cycle, const LuojiaFox::RobotCmdState& a
         return;
     }
 
-    cycle.passage_requested = aim.passage_requested;
-    cycle.aim_yaw = aim.gimbal_yaw;
-    cycle.aim_pitch = aim.gimbal_pitch;
+    cycle.navigation_control = robot_cmd_seen;
+    cycle.passage_requested = cmd.passage_requested;
+    cycle.aim_yaw = cmd.gimbal_yaw;
+    cycle.aim_pitch = cmd.gimbal_pitch;
     const bool fresh_aim = robot_cmd_seen &&
-        cycle.now - aim.last_update_ms < GIMBAL_AIM_TIMEOUT_MS &&
+        cycle.now - cmd.last_update_ms < GIMBAL_AIM_TIMEOUT_MS &&
         isfinite(cycle.aim_yaw) && isfinite(cycle.aim_pitch);
-    const bool tracking = aim.gimbal_aim_changed_ms != 0U &&
-        cycle.now - aim.gimbal_aim_changed_ms < GIMBAL_AIM_LOST_MS;
+    const bool tracking = cmd.gimbal_aim_changed_ms != 0U &&
+        cycle.now - cmd.gimbal_aim_changed_ms < GIMBAL_AIM_LOST_MS;
     const Mode scan_mode = mode == Mode::kGap || mode == Mode::kScan ? Mode::kScan : Mode::kGap;
     cycle.normal_mode = fresh_aim && tracking ? Mode::kAutoAim : scan_mode;
 }
@@ -224,6 +249,9 @@ void observe(ControlCycle& cycle) {
         taskEXIT_CRITICAL();
     }
     selectControlRequest(cycle, state.robot_cmd, aux_passage);
+    cycle.chassis_stopped = state.chassis.valid &&
+        cycle.now - state.chassis.last_update_ms < board_link::can3::kChassisFeedbackTimeoutMs &&
+        hypotf(state.chassis.vx, state.chassis.vy) <= 0.05f && fabsf(state.chassis.wz) <= 0.10f;
 
     const bool mechanical_mode = mode == Mode::kPassage || passage.stage == PassageStage::kFault ||
                                  cycle.passage_requested;
@@ -266,7 +294,8 @@ void handleException(ControlCycle& cycle) {
     if (passage_fault) {
         setMode(Mode::kFault, cycle.yaw, cycle.pitch);
     }
-    cycle.enable = !passage_fault || (passage.rearmed && cycle.passage_requested);
+    cycle.enable = !passage_fault ||
+        (!cycle.navigation_control && passage.rearmed && cycle.passage_requested);
     cycle.stop = !cycle.enable || !motors_ready;
 }
 
@@ -277,6 +306,10 @@ void failPassage(const ControlCycle& cycle) {
 }
 
 void updatePassageStage(const ControlCycle& cycle) {
+    // A restore request brakes the chassis before moving the folded assembly.
+    if (cycle.navigation_control && !cycle.passage_requested && !cycle.chassis_stopped &&
+        (passage.stage == PassageStage::kAlign || passage.stage == PassageStage::kFold ||
+         passage.stage == PassageStage::kHold)) { return; }
     if (!cycle.passage_requested && passage.stage == PassageStage::kAlign) {
         // Cancel alignment and hold the current yaw and pitch while returning upright.
         startPassage(cycle, PassageStage::kUnfold, yaw.joint, pitch.joint);
@@ -298,7 +331,14 @@ void updatePassageStage(const ControlCycle& cycle) {
     if (cycle.big_yaw_centered && cycle.big_yaw_feedback_revision != passage.entry_feedback_revision) {
         passage.center_confirmed = true;
     }
-    if (passage.stage == PassageStage::kHold) { return; }
+    if (passage.stage == PassageStage::kHold) {
+        if (fabsf(roll.joint - GIMBAL_PASS_ROLL_RAD) > 2 * GIMBAL_PASS_POSITION_TOL_RAD ||
+            fabsf(yaw.joint - passage.yaw_goal) > 2 * GIMBAL_PASS_POSITION_TOL_RAD ||
+            fabsf(pitch.joint - passage.pitch_goal) > 2 * GIMBAL_PASS_POSITION_TOL_RAD) {
+            failPassage(cycle);
+        }
+        return;
+    }
 
     const float roll_goal = passage.stage == PassageStage::kFold ?
         GIMBAL_PASS_ROLL_RAD : GIMBAL_ROLL_UPRIGHT_RAD;
@@ -313,9 +353,11 @@ void updatePassageStage(const ControlCycle& cycle) {
             setPassageStage(PassageStage::kFold, cycle.now);
             break;
         case PassageStage::kFold:
+            completed_shape = LuojiaFox::GimbalShape::Folded;
             setPassageStage(PassageStage::kHold, cycle.now);
             break;
         case PassageStage::kUnfold:
+            completed_shape = LuojiaFox::GimbalShape::Upright;
             setPassageStage(PassageStage::kWait, cycle.now);
             break;
         default:
@@ -339,6 +381,7 @@ void selectMode(ControlCycle& cycle) {
         failPassage(cycle); return;
     }
     if (cycle.passage_requested) {
+        if (cycle.navigation_control && !cycle.chassis_stopped) { return; }
         startPassage(cycle, PassageStage::kAlign, 0.0f, GIMBAL_PASS_PITCH_RAD);
         return;
     }
@@ -390,6 +433,7 @@ void updateReference(ControlCycle& cycle) {
         const bool centered = fabsf(yaw.joint) < GIMBAL_INIT_TOLERANCE_RAD &&
                               fabsf(pitch.joint) < GIMBAL_INIT_TOLERANCE_RAD;
         if (centered) {
+            completed_shape = LuojiaFox::GimbalShape::Upright;
             calibrated = true;
             setMode(Mode::kGap, cycle.yaw, cycle.pitch);
         } else if (cycle.now - init_start >= GIMBAL_INIT_TIMEOUT_MS) {

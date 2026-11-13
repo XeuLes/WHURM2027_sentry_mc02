@@ -56,6 +56,7 @@ void sendChassis(uint32_t now, const ChassisTarget& target, bool peer_online, ui
     ChassisTargetFrame frame{};
     frame.flags = kVersion | (target.mode & kChassisModeMask);
     frame.sequence = sequence;
+    if (target.motion_blocked) { frame.flags |= kChassisMotionBlocked; }
     if (peer_online && target.valid && target.mode == last_sent_mode &&
         now - target.updated_at_ms < kChassisSourceTimeoutMs && std::isfinite(target.vx) &&
         std::isfinite(target.vy) && std::isfinite(target.wz)) {
@@ -101,9 +102,9 @@ void exchangeTargets() {
     const uint32_t now = HAL_GetTick();
     const bool peer_online = feedback.fresh(now, kBigYawTimeoutMs);
 
-    // RC and host translation both use the muzzle frame, including small yaw.
-    // Planning stays here; subControl must not rotate the target again.
-    if (chassis_target.valid) {
+    // ROS navigation supplies chassis-frame velocity. Only manual RC translation
+    // follows the muzzle frame; subControl always receives chassis coordinates.
+    if (chassis_target.valid && chassis_target.mode == CHASSIS_MODE_DIRECT_RC) {
         const float offset_rad = yaw_target.muzzle_to_chassis_rad;
         const bool offset_ok = now - yaw_target.updated_at_ms < kBigYawTimeoutMs &&
             yaw_target.big_yaw_offset_valid && yaw_target.muzzle_offset_valid &&

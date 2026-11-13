@@ -40,15 +40,12 @@ ChassisModeTypedef ChassisCommandSelector::selectMode(bool rc_online) const
         return mode_;
     }
 
-    if (SWITCH_IS_DOWN(getDt7RcSw(RC_SW_RIGHT))) {
-        return CHASSIS_MODE_DISABLED;
-    }
-
-    const char left_switch = getDt7RcSw(RC_SW_LEFT);
-    if (SWITCH_IS_UP(left_switch)) {
+    // The chassis and gimbal use the same mode switch (ET08A SB / CH7).
+    const char mode_switch = getDt7RcSw(RC_SW_RIGHT);
+    if (SWITCH_IS_UP(mode_switch)) {
         return CHASSIS_MODE_AUTO_VISION;
     }
-    if (SWITCH_IS_MID(left_switch)) {
+    if (SWITCH_IS_MID(mode_switch)) {
         return CHASSIS_MODE_DIRECT_RC;
     }
     return CHASSIS_MODE_DISABLED;
@@ -93,13 +90,13 @@ ChassisCommandSelection ChassisCommandSelector::update(
 
         const bool fresh =
             robot_cmd.last_update_ms != 0U
-            && now_ms - robot_cmd.last_update_ms <= kAutoCommandTimeoutMs;
+            && now_ms - robot_cmd.last_update_ms < kAutoCommandTimeoutMs;
         const bool finite =
             std::isfinite(robot_cmd.vx)
             && std::isfinite(robot_cmd.vy)
             && std::isfinite(robot_cmd.wz);
 
-        if (fresh && finite) {
+        if (robot_cmd.chassis_enabled && fresh && finite) {
             command.vx = basic_math::constrain(robot_cmd.vx, -kMaxVx, kMaxVx);
             command.vy = basic_math::constrain(robot_cmd.vy, -kMaxVy, kMaxVy);
             command.wz = basic_math::constrain(robot_cmd.wz, -kMaxWz, kMaxWz);

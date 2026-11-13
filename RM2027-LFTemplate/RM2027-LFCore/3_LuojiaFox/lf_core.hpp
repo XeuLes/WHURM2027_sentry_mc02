@@ -46,6 +46,11 @@ struct ChassisState
     uint32_t last_update_ms = 0; // 副板反馈接收时间，重复读取不得刷新
 };
 
+enum class GimbalTransformState : uint8_t {
+    Disabled = 0, Recovering = 1, Preparing = 3, Ready = 4, Restoring = 5, Fault = 6
+};
+enum class GimbalShape : uint8_t { Unknown = 0, Folded = 3, Upright = 4 };
+
 struct GimbalState
 {
     float yaw_deg;
@@ -57,6 +62,9 @@ struct GimbalState
     bool ready = false;
     uint32_t updated_at_ms = 0U;
     bool yaw_joint_online = false;
+    float joint_roll_rad = 0;
+    GimbalTransformState transform_state = GimbalTransformState::Disabled;
+    GimbalShape transformed = GimbalShape::Unknown;
 };
 
 struct ShooterState
@@ -87,8 +95,11 @@ struct RobotCmdState
     uint8_t fire;
     uint8_t fric_on;
     uint32_t last_update_ms;
-    bool passage_requested = false;
+    bool passage_requested = false; // 由折叠/回正命令锁存
     uint32_t gimbal_aim_changed_ms = 0U;
+    float big_yaw_heading_rad = 0.0f;
+    bool chassis_enabled = false;
+    bool heading_valid = false;
 };
 
 struct UsbLinkState

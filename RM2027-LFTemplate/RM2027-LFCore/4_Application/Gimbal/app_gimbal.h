@@ -10,7 +10,7 @@ LF_EXTERN_C void Gimbal_Task(void const* argument);
 #include <stdint.h>
 namespace gimbal {
 enum class Mode : uint8_t {
-    kZeroForce = 0, kInit, kGap, kManual, kScan, kAutoAim, kFollow, kFault, kPassage
+    kZeroForce = 0, kInit, kGap, kManual, kScan, kAutoAim, kFollow, kFault, kPassage, kNavigation
 };
 enum class PassageStage : uint8_t {
     kIdle = 0, kAlign, kFold, kHold, kUnfold, kWait, kFault
