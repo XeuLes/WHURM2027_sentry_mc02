@@ -163,6 +163,8 @@ void OmniMotionCompensator::reset() {
     vx_axis_ = {};
     vy_axis_ = {};
     yaw_rate_rad_s_ = 0.0f;
+    heading_rad_ = 0.0f;
+    output_rotation_rad_ = 0.0f;
     valid_wheel_mask_ = 0U;
     initialized_ = false;
     velocity_measurement_valid_ = false;
@@ -203,20 +205,19 @@ void OmniMotionCompensator::predictAxis(
 ) {
     const float dt2 = dt_s * dt_s;
     const float dt3 = dt2 * dt_s;
-    const float dt4 = dt2 * dt2;
     const float q = config.acceleration_process_noise;
 
     // 状态方程：v(k+1)=v(k)+a(k)dt，a(k+1)=a(k)。
     axis->velocity += axis->acceleration * dt_s;
 
-    // P(k+1)=F*P*F^T+Q，Q 由连续加速度过程噪声离散化。
+    // q 为连续白噪声 jerk 的谱密度，离散 Q 使用 dt³/3、dt²/2、dt。
     const float old_p00 = axis->p00;
     const float old_p01 = axis->p01;
     const float old_p11 = axis->p11;
     axis->p00 = old_p00 + 2.0f * dt_s * old_p01 + dt2 * old_p11
-              + q * dt4 * 0.25f;
-    axis->p01 = old_p01 + dt_s * old_p11 + q * dt3 * 0.5f;
-    axis->p11 = old_p11 + q * dt2;
+              + q * dt3 / 3.0f;
+    axis->p01 = old_p01 + dt_s * old_p11 + q * dt2 * 0.5f;
+    axis->p11 = old_p11 + q * dt_s;
 }
 
 void OmniMotionCompensator::updateVelocity(
@@ -424,8 +425,8 @@ void OmniMotionCompensator::updateSlipDetection(
         || !std::isfinite(measurement.acceleration_y_mps2)
         || !std::isfinite(measurement.yaw_rad)
         || !std::isfinite(measurement.yaw_rate_rad_s)
-        || !std::isfinite(measurement.wheel_radius_m)
-        || measurement.wheel_radius_m <= 0.0f
+        || !std::isfinite(measurement.wheel_center_distance_m)
+        || measurement.wheel_center_distance_m <= 0.0f
         || !std::isfinite(predicted_vx_mps)
         || !std::isfinite(predicted_vy_mps)) {
         resetSlipState();
@@ -455,7 +456,7 @@ void OmniMotionCompensator::updateSlipDetection(
             sin_yaw * kWheelBaseX[wheel] + cos_yaw * kWheelBaseY[wheel];
         const float expected_wheel_speed =
             row_x * predicted_vx_mps + row_y * predicted_vy_mps
-            - measurement.wheel_radius_m * measurement.yaw_rate_rad_s;
+            - measurement.wheel_center_distance_m * measurement.yaw_rate_rad_s;
         const float actual_wheel_speed =
             measurement.wheel_linear_velocity_mps[wheel];
         const float residual = actual_wheel_speed - expected_wheel_speed;
@@ -512,10 +513,26 @@ void OmniMotionCompensator::updateSlipDetection(
     slip_detection_valid_ = true;
 }
 
-bool OmniMotionCompensator::update(const Measurement& measurement) {
-    if (!configured_ || !std::isfinite(measurement.dt_s) || measurement.dt_s <= 0.0f) {
+bool OmniMotionCompensator::update(const Measurement& input) {
+    if (!configured_ || !std::isfinite(input.dt_s) || input.dt_s <= 0.0f
+        || !std::isfinite(input.yaw_rad)) {
         return false;
     }
+
+    // 固定参考系内做 v += a*dt，避免把旋转底盘系误当成惯性系。
+    // 轮速、去重力加速度和打滑预测始终使用同一个参考系。
+    const bool rate_valid = input.yaw_rate_valid && std::isfinite(input.yaw_rate_rad_s);
+    if (initialized_ && rate_valid) {
+        const float heading = heading_rad_ + input.yaw_rate_rad_s * input.dt_s;
+        heading_rad_ = std::atan2(std::sin(heading), std::cos(heading));
+    }
+    output_rotation_rad_ = input.yaw_rad - heading_rad_;
+    const float c = std::cos(heading_rad_);
+    const float s = std::sin(heading_rad_);
+    Measurement measurement = input;
+    measurement.yaw_rad = heading_rad_;
+    measurement.acceleration_x_mps2 = c * input.acceleration_x_mps2 - s * input.acceleration_y_mps2;
+    measurement.acceleration_y_mps2 = s * input.acceleration_x_mps2 + c * input.acceleration_y_mps2;
 
     float measured_vx = 0.0f;
     float measured_vy = 0.0f;
@@ -644,16 +661,18 @@ bool OmniMotionCompensator::update(const Measurement& measurement) {
 
 Estimate OmniMotionCompensator::estimate() const {
     Estimate result {};
-    result.vx_mps = vx_axis_.velocity;
-    result.vy_mps = vy_axis_.velocity;
-    result.ax_mps2 = vx_axis_.acceleration;
-    result.ay_mps2 = vy_axis_.acceleration;
+    const float c = std::cos(output_rotation_rad_);
+    const float s = std::sin(output_rotation_rad_);
+    result.vx_mps = c * vx_axis_.velocity - s * vy_axis_.velocity;
+    result.vy_mps = s * vx_axis_.velocity + c * vy_axis_.velocity;
+    result.ax_mps2 = c * vx_axis_.acceleration - s * vy_axis_.acceleration;
+    result.ay_mps2 = s * vx_axis_.acceleration + c * vy_axis_.acceleration;
     result.yaw_rate_rad_s = yaw_rate_rad_s_;
     result.initialized = initialized_;
     result.velocity_measurement_valid = velocity_measurement_valid_;
     result.valid_wheel_mask = valid_wheel_mask_;
-    result.predicted_vx_mps = predicted_vx_mps_;
-    result.predicted_vy_mps = predicted_vy_mps_;
+    result.predicted_vx_mps = c * predicted_vx_mps_ - s * predicted_vy_mps_;
+    result.predicted_vy_mps = s * predicted_vx_mps_ + c * predicted_vy_mps_;
     for (uint8_t wheel = 0U; wheel < kWheelCount; ++wheel) {
         result.slip_velocity_mps[wheel] = slip_velocity_mps_[wheel];
         result.slip_score[wheel] = slip_score_[wheel];
@@ -682,8 +701,9 @@ CorrectedVelocity OmniMotionCompensator::compensate(
 
     // 文档中的 P 补偿：Kp = K*|w|，作用于目标与估计值之差。
     const float gain = config_.correction_gain_per_rad_s * std::fabs(yaw_rate_rad_s_);
-    float correction_x = gain * (target_vx_mps - vx_axis_.velocity);
-    float correction_y = gain * (target_vy_mps - vy_axis_.velocity);
+    const Estimate current = estimate();
+    float correction_x = gain * (target_vx_mps - current.vx_mps);
+    float correction_y = gain * (target_vy_mps - current.vy_mps);
 
     // 限制补偿向量模长，避免滤波瞬态或错误轮速造成过大的目标跳变。
     const float correction_norm = std::sqrt(

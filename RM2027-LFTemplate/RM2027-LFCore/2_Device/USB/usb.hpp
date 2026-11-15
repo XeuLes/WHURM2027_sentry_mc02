@@ -147,6 +147,7 @@ public:
 private:
     /* 链路状态  */
     uint8_t rx_buf[USB_RX_DATA_SIZE];
+    uint32_t rx_size = 0U;
 
     bool offline = true;
     uint32_t receive_time = 0;

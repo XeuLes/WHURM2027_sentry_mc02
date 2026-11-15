@@ -58,7 +58,7 @@ constexpr float kSlipEnterHoldS = 0.005f;
 constexpr float kSlipExitHoldS = 0.020f;
 
 // 坡道重力前馈。整车质量标定前保持为 0，算法输出补偿力为零。
-constexpr bool kEnableGravityCompensation = true;
+constexpr bool kEnableGravityCompensation = false; // 质量、IMU 安装未标定前不启用
 constexpr float kGravityCompensationMassKg = 0.0f;
 constexpr float kGravityMps2 = 9.718f;
 constexpr float kGravityScaleX = 1.0f;

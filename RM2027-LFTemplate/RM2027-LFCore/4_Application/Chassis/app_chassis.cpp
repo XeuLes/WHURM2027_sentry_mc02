@@ -52,6 +52,9 @@ void Chassis_Control(void)
     const uint32_t now_ms = HAL_GetTick();
     const chassis_app::ChassisCommandSelection selection =
         board_link::getChassisSelection(now_ms);
+    if (selection.reset_output_fault) {
+        chassis_app::g_chassisController.clearOutputFault();
+    }
     buzzer.update(now_ms);
     const chassis_app::ChassisFeedback feedback =
         chassis_app::g_chassisController.readFeedback(state.imu, now_ms);

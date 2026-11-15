@@ -20,12 +20,14 @@ chassis_app::ChassisCommandSelection getChassisSelection(uint32_t now) {
     result.mode_changed = mode != result.mode;
     mode = result.mode;
     taskEXIT_CRITICAL();
+    result.reset_output_fault = rx.fresh(now, can3::kChassisTimeoutMs) &&
+        result.mode == CHASSIS_MODE_DISABLED;
     result.command.source_update_ms = rx.rx_ms;
     result.command.ready = rx.fresh(now, can3::kChassisTimeoutMs) &&
         (rx.data.flags & can3::kChassisTargetValid) &&
         result.mode != CHASSIS_MODE_DISABLED && !result.mode_changed;
-    if (result.command.ready) {
-        // Already rotated into chassis coordinates by mainControl.
+    if (result.command.ready && !(rx.data.flags & can3::kChassisMotionBlocked)) {
+        // mainControl supplies chassis coordinates for both RC and navigation.
         result.command.vx = rx.data.vx / can3::kSpeedScale;
         result.command.vy = rx.data.vy / can3::kSpeedScale;
         result.command.wz = rx.data.wz / can3::kSpeedScale;

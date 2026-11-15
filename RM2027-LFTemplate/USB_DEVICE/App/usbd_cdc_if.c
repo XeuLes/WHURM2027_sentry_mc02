@@ -22,6 +22,7 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
+#include <string.h>
 
 /* USER CODE END INCLUDE */
 
@@ -30,6 +31,8 @@
 /* Private macro -------------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+static volatile uint32_t rx_pending_length = 0U;
+static uint32_t rx_pending_offset = 0U;
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE END PV */
@@ -154,6 +157,8 @@ USBD_CDC_ItfTypeDef USBD_Interface_fops_HS =
 static int8_t CDC_Init_HS(void)
 {
   /* USER CODE BEGIN 8 */
+  rx_pending_length = 0U;
+  rx_pending_offset = 0U;
   /* Set Application Buffers */
   USBD_CDC_SetTxBuffer(&hUsbDeviceHS, UserTxBufferHS, 0);
   USBD_CDC_SetRxBuffer(&hUsbDeviceHS, UserRxBufferHS);
@@ -169,6 +174,8 @@ static int8_t CDC_Init_HS(void)
 static int8_t CDC_DeInit_HS(void)
 {
   /* USER CODE BEGIN 9 */
+  rx_pending_length = 0U;
+  rx_pending_offset = 0U;
   return (USBD_OK);
   /* USER CODE END 9 */
 }
@@ -264,8 +271,14 @@ static int8_t CDC_Control_HS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_HS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 11 */
-  USBD_CDC_SetRxBuffer(&hUsbDeviceHS, &Buf[0]);
-  USBD_CDC_ReceivePacket(&hUsbDeviceHS);
+  /* Hold the endpoint until the task has consumed this packet. */
+  (void)Buf;
+  rx_pending_offset = 0U;
+  rx_pending_length = *Len;
+  if (*Len == 0U) {
+    USBD_CDC_SetRxBuffer(&hUsbDeviceHS, UserRxBufferHS);
+    USBD_CDC_ReceivePacket(&hUsbDeviceHS);
+  }
   return (USBD_OK);
   /* USER CODE END 11 */
 }
@@ -281,12 +294,21 @@ uint8_t CDC_Transmit_HS(uint8_t* Buf, uint16_t Len)
 {
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 12 */
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
   USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceHS.pClassData;
-  if (hcdc->TxState != 0){
+  if (hUsbDeviceHS.dev_state != USBD_STATE_CONFIGURED || hcdc == NULL || Len > APP_TX_DATA_SIZE) {
+    __set_PRIMASK(primask);
+    return USBD_FAIL;
+  }
+  if (hcdc->TxState != 0) {
+    __set_PRIMASK(primask);
     return USBD_BUSY;
   }
-  USBD_CDC_SetTxBuffer(&hUsbDeviceHS, Buf, Len);
+  memcpy(UserTxBufferHS, Buf, Len);
+  USBD_CDC_SetTxBuffer(&hUsbDeviceHS, UserTxBufferHS, Len);
   result = USBD_CDC_TransmitPacket(&hUsbDeviceHS);
+  __set_PRIMASK(primask);
   /* USER CODE END 12 */
   return result;
 }
@@ -336,14 +358,36 @@ uint8_t USB_Transmit(uint8_t* Buf, uint16_t Len)
 }
 
 /**
-  * @brief  本函数为了方便使用USB设备接收数据，其实就是调用CDC_Receive_HS/-/
+  * @brief  Copy pending CDC bytes; Len is buffer capacity on entry and bytes read on return.
   * @param  Buf: Buffer of data to be received
-  * @param  Len: Number of data received (in bytes)
-  * @retval Result of the operation: USBD_OK if all operations are OK else USBD_FAIL
+  * @param  Len: Input capacity / output byte count.
+  * @retval USBD_OK when configured, USBD_FAIL when disconnected.
   */
 int8_t USB_Receive(uint8_t* Buf, uint32_t *Len)
 {
-  return CDC_Receive_HS(Buf,Len);
+  const uint32_t capacity = *Len;
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  *Len = 0U;
+  if (hUsbDeviceHS.dev_state != USBD_STATE_CONFIGURED || hUsbDeviceHS.pClassData == NULL) {
+    __set_PRIMASK(primask);
+    return USBD_FAIL;
+  }
+  const uint32_t remaining = rx_pending_length - rx_pending_offset;
+  const uint32_t count = remaining < capacity ? remaining : capacity;
+  if (count > 0U) {
+    memcpy(Buf, UserRxBufferHS + rx_pending_offset, count);
+    rx_pending_offset += count;
+    *Len = count;
+    if (rx_pending_offset == rx_pending_length) {
+      rx_pending_length = 0U;
+      rx_pending_offset = 0U;
+      USBD_CDC_SetRxBuffer(&hUsbDeviceHS, UserRxBufferHS);
+      USBD_CDC_ReceivePacket(&hUsbDeviceHS);
+    }
+  }
+  __set_PRIMASK(primask);
+  return USBD_OK;
 }
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */

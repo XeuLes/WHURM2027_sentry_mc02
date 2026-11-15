@@ -98,6 +98,18 @@ public:
     /** @brief 清除闭环历史状态并发送零电流命令。 */
     void stop();
 
+    /** @brief 仅由主控明确失能命令调用，允许故障后重新使能。 */
+    void clearOutputFault()
+    {
+        output_fault_ = false;
+    }
+
+    /** @brief 查询 CAN 输出是否因发送失败锁定。 */
+    bool outputFault() const
+    {
+        return output_fault_;
+    }
+
     // 调试快照：可直接在 Live Watch 中展开 g_chassisController。
     /** @brief 查询四轮力分配矩阵是否构建成功。 */
     bool forceReady() const
@@ -155,6 +167,7 @@ private:
     float wz_filtered_ = 0.0f;
     float motion_acceleration_x_ = 0.0f;
     float motion_acceleration_y_ = 0.0f;
+    bool output_fault_ = false;
     bool force_ready_ = false;
     bool motion_ready_ = false;
     bool gravity_ready_ = false;

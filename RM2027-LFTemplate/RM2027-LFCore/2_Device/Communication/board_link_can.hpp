@@ -41,6 +41,7 @@ constexpr float kBigYawSlowSpeedRadS = 0.05f;
 
 constexpr uint8_t kChassisModeMask = 0x03U;
 constexpr uint8_t kChassisTargetValid = 0x04U;
+constexpr uint8_t kChassisMotionBlocked = 0x08U; // brake with zero velocity during transformation
 constexpr uint8_t kChassisFeedbackValid = 0x08U;
 constexpr uint8_t kBigYawEnable = 0x01U;
 constexpr uint8_t kBigYawTargetValid = 0x02U;

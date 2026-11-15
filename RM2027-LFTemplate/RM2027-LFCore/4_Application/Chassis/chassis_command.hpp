@@ -25,6 +25,7 @@ struct ChassisCommandSelection {
     ChassisCommand command {};
     ChassisModeTypedef mode = CHASSIS_MODE_AUTO_VISION;
     bool mode_changed = false;
+    bool reset_output_fault = false; // 新鲜的主控失能命令，断联不复位
 };
 
 class ChassisCommandSelector {

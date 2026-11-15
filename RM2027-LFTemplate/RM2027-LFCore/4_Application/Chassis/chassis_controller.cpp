@@ -40,7 +40,7 @@ float wheelAngularVelocity(
     }
 
     // 纯旋转时各轮轮缘线速度为 -R*wz。
-    return -sum / (static_cast<float>(count) * kWheelRadius);
+    return -sum / (static_cast<float>(count) * kWheelCenterDistance);
 }
 
 } // namespace
@@ -187,11 +187,12 @@ ChassisFeedback ChassisController::readFeedback(
         measurement.wheel_linear_velocity_mps[i] = feedback.wheel_linear[i];
     }
     measurement.valid_wheel_mask = feedback.valid_wheel_mask;
+    // 控制目标和反馈均为底盘系；融合器内部处理底盘旋转。
     measurement.yaw_rad = 0.0f;
     measurement.yaw_rate_rad_s =
         imu_fresh ? imu.yaw_rate_dps * BASIC_MATH_DEG_TO_RAD : 0.0f;
     measurement.yaw_rate_valid = imu_fresh;
-    measurement.wheel_radius_m = kWheelRadius;
+    measurement.wheel_center_distance_m = kWheelCenterDistance;
     measurement.acceleration_x_mps2 =
         imu_fresh ? imu.acceleration_x_mps2 : 0.0f;
     measurement.acceleration_y_mps2 =
@@ -285,7 +286,7 @@ bool ChassisController::calculate(
         return false;
     }
 
-    if (!command.ready || !feedback.velocity_estimate_valid
+    if (output_fault_ || !command.ready || !feedback.velocity_estimate_valid
         || !feedback.all_wheels_online || !force_ready_) {
         resetControlState();
         for (uint8_t i = 0U; i < kWheelCount; ++i) {
@@ -358,13 +359,16 @@ void ChassisController::sendCurrents(const float current[kWheelCount])
 
     for (uint8_t i = 0U; i < kWheelCount; ++i) {
         const float raw = basic_math::constrain(
-            current[i] * (16384.0f / kC620MaxCurrent),
+            (output_fault_ ? 0.0f : current[i]) * (16384.0f / kC620MaxCurrent),
             -16384.0f,
             16384.0f
         );
         wheel_motor_[i].setCommand(static_cast<int16_t>(raw));
     }
-    (void)DjiMotor::sendGroup(&hfdcan1, kChassisTxId);
+    if (!DjiMotor::sendGroup(&hfdcan1, kChassisTxId)) {
+        output_fault_ = true;
+        resetControlState();
+    }
 }
 
 /** @brief 发送零目标电流。 */

@@ -14,7 +14,7 @@ constexpr int16_t kPiEncoded = 31416;
 bool angle(int16_t value) { return value >= -kPiEncoded && value <= kPiEncoded; }
 
 bool valid(const ChassisTargetFrame& f) {
-    return (f.flags & 0x08U) == 0U && (f.flags & kChassisModeMask) <= 2U;
+    return (f.flags & kChassisModeMask) <= 2U;
 }
 bool valid(const BigYawTargetFrame& f) {
     return (f.flags & 0x08U) == 0U &&

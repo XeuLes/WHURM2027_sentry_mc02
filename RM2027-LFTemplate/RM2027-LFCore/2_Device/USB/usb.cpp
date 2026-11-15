@@ -56,7 +56,6 @@
 
 // clang-format on
 
-#define USB_RECEIVE_LEN 150   // byte
 #define HEADER_SIZE 4         // byte
 
 #define CheckDurationAndSend(send_name)                                                  \
@@ -105,6 +104,7 @@ void Usb::Update(void)
  */
 void Usb::Init(void)
 {
+    rx_size = 0U;
     // 数据置零
     memset(&last_send_time, 0, sizeof(LastSendTime_t));
     memset(&receive_robot_cmd, 0, sizeof(ReceiveDataRobotCmd_s));
@@ -311,93 +311,76 @@ void Usb::SendAll(void)
  */
 void Usb::Receive(void)
 {
-    static uint32_t len = USB_RECEIVE_LEN;
-    static uint8_t * rx_data_start_address = rx_buf;  // 接收数据包时存放于缓存区的起始位置
-    static uint8_t * rx_data_end_address;  // 接收数据包时存放于缓存区的结束位置
-    uint8_t * sof_address = rx_buf;
-
-    // 计算数据包的结束位置
-    rx_data_end_address = rx_data_start_address + USB_RECEIVE_LEN;
-    // 读取数据
-    USB_Receive(rx_data_start_address, &len);  // Read data into the buffer
-
-    while (sof_address <= rx_data_end_address) {  // 解析缓冲区中的所有数据包
-        // 寻找帧头位置
-        while (*(sof_address) != RECEIVE_SOF && (sof_address <= rx_data_end_address)) {
-            sof_address++;
+    uint32_t received = sizeof(rx_buf) - rx_size;
+    if (USB_Receive(rx_buf + rx_size, &received) != USBD_OK) {
+        rx_size = 0U;
+        return;
+    }
+    rx_size += received;
+    uint32_t consumed = 0U;
+    while (rx_size - consumed >= HEADER_SIZE) {
+        uint8_t* frame = rx_buf + consumed;
+        if (frame[0] != RECEIVE_SOF || !verify_CRC8_check_sum(frame, HEADER_SIZE)) {
+            ++consumed;
+            continue;
         }
-        // 判断是否超出接收数据范围
-        if (sof_address > rx_data_end_address) {
-            break;  // 退出循环
+        const uint32_t frame_size = HEADER_SIZE + frame[1] + sizeof(uint16_t);
+        const uint8_t id = frame[2];
+        const bool legacy = id == ROBOT_CMD_DATA_RECEIVE_ID &&
+            frame_size == sizeof(receive_robot_cmd) - sizeof(receive_robot_cmd.gimbal_cmd);
+        const bool known_size =
+            (id == ROBOT_CMD_DATA_RECEIVE_ID && (legacy || frame_size == sizeof(receive_robot_cmd))) ||
+            (id == PID_DEBUG_DATA_RECEIVE_ID && frame_size == sizeof(receive_pid_debug)) ||
+            (id == VIRTUAL_RC_DATA_RECEIVE_ID && frame_size == sizeof(receive_virtual_rc)) ||
+            (id == SENTRY_CMD_RECEIVE_ID && frame_size == sizeof(receive_sentry_cmd));
+        if (!known_size || frame_size > sizeof(rx_buf)) {
+            ++consumed;
+            continue;
         }
-        // 检查CRC8校验
-        bool crc8_ok = verify_CRC8_check_sum(sof_address, HEADER_SIZE);
-        if (crc8_ok) {
-            uint8_t data_len = sof_address[1];
-            uint8_t data_id = sof_address[2];
-            // 检查整包CRC16校验 4: header size, 2: crc16 size
-            bool crc16_ok = verify_CRC16_check_sum(sof_address, 4 + data_len + 2);
-            if (crc16_ok) {
-                switch (data_id) {
-                    case ROBOT_CMD_DATA_RECEIVE_ID: {
-                        const auto frame_size = HEADER_SIZE + data_len + sizeof(uint16_t);
-                        const bool legacy = frame_size ==
-                            sizeof(receive_robot_cmd) - sizeof(receive_robot_cmd.gimbal_cmd);
-                        if (!legacy && frame_size != sizeof(receive_robot_cmd)) { break; }
-
-                        uint32_t command_timestamp;
-                        memcpy(&command_timestamp, &sof_address[4], sizeof(command_timestamp));
-                        if (has_robot_cmd_timestamp &&
-                            static_cast<int32_t>(command_timestamp - latest_robot_cmd_timestamp) <= 0) {
-                            break;
-                        }
-
-                        memcpy(&receive_robot_cmd, sof_address, frame_size - sizeof(uint16_t));
-                        if (legacy) {
-                            receive_robot_cmd.gimbal_cmd = 0U;
-                        } else if (receive_robot_cmd.gimbal_cmd > 1U) {
-                            break;
-                        }
-                        latest_robot_cmd_timestamp = command_timestamp;
-                        has_robot_cmd_timestamp = true;
-                        UpdateRobotCmd();
-                        receive_time = robot_cmd_receive_time;
-                    } break;
-                    case PID_DEBUG_DATA_RECEIVE_ID: {
-                        memcpy(&receive_pid_debug, sof_address, sizeof(ReceiveDataPidDebug_s));
-                    } break;
-                    case VIRTUAL_RC_DATA_RECEIVE_ID: {
-                        memcpy(
-                            &receive_virtual_rc, sof_address, sizeof(ReceiveDataVirtualRc_s));
-                    } break;
-                    case SENTRY_CMD_RECEIVE_ID: {
-                        memcpy(
-                            &receive_sentry_cmd, sof_address, sizeof(ReceiveDataSentryCmd_s));
-                    } break;
-                    default:
-                        break;
-                }
-                if (*((uint32_t *)(&sof_address[4])) > latest_rx_timestamp) {
-                    latest_rx_timestamp = *((uint32_t *)(&sof_address[4]));
-                    receive_time = HAL_GetTick();
-                }
+        if (rx_size - consumed < frame_size) { break; }
+        if (!verify_CRC16_check_sum(frame, frame_size)) {
+            ++consumed;
+            continue;
+        }
+        consumed += frame_size;
+        uint32_t timestamp;
+        memcpy(&timestamp, frame + HEADER_SIZE, sizeof(timestamp));
+        switch (id) {
+        case ROBOT_CMD_DATA_RECEIVE_ID: {
+            if (has_robot_cmd_timestamp &&
+                static_cast<int32_t>(timestamp - latest_robot_cmd_timestamp) <= 0) {
+                continue;
             }
-            sof_address += (data_len + HEADER_SIZE + 2);
-        } else {  //CRC8校验失败，移动到下一个字节
-            sof_address++;
+            ReceiveDataRobotCmd_s candidate{};
+            memcpy(&candidate, frame, frame_size - sizeof(uint16_t));
+            if (legacy) { candidate.gimbal_cmd = 0U; }
+            if (candidate.gimbal_cmd > 1U) { continue; }
+            receive_robot_cmd = candidate;
+            latest_robot_cmd_timestamp = timestamp;
+            has_robot_cmd_timestamp = true;
+            UpdateRobotCmd();
+            receive_time = robot_cmd_receive_time;
+            break;
+        }
+        case PID_DEBUG_DATA_RECEIVE_ID:
+            memcpy(&receive_pid_debug, frame, frame_size);
+            break;
+        case VIRTUAL_RC_DATA_RECEIVE_ID:
+            memcpy(&receive_virtual_rc, frame, frame_size);
+            break;
+        case SENTRY_CMD_RECEIVE_ID:
+            memcpy(&receive_sentry_cmd, frame, frame_size);
+            break;
+        default:
+            break;
+        }
+        if (timestamp > latest_rx_timestamp) {
+            latest_rx_timestamp = timestamp;
+            receive_time = HAL_GetTick();
         }
     }
-    // 更新下一次接收数据的起始位置
-    if (sof_address > rx_data_start_address + USB_RECEIVE_LEN) {
-        // 缓冲区中没有剩余数据，下次接收数据的起始位置为缓冲区的起始位置
-        rx_data_start_address = rx_buf;
-    } else {
-        uint16_t remaining_data_len = USB_RECEIVE_LEN - (sof_address - rx_data_start_address);
-        // 缓冲区中有剩余数据，下次接收数据的起始位置为缓冲区中剩余数据的起始位置
-        rx_data_start_address = rx_buf + remaining_data_len;
-        // 将剩余数据移到缓冲区的起始位置
-        memcpy(rx_buf, sof_address, remaining_data_len);
-    }
+    rx_size -= consumed;
+    memmove(rx_buf, rx_buf + consumed, rx_size);
 }
 
 /*******************************************************************************/
