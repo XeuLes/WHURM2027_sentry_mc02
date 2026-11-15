@@ -6,6 +6,7 @@
 #include "alg_smc.hpp"
 #include "app_board_link.hpp"
 #include "app_gimbal.h"
+#include "gimbal_config.h"
 #include "dvc_dji_motor.hpp"
 #include "lf_core.hpp"
 #include "referee.hpp"
@@ -51,6 +52,7 @@ struct ShootState {
     FricState state = FRIC_NOT_READY;
     bool motors_online = false;
     bool inhibited = true;
+    bool output_fault = false;
     bool stop_requested = true;
     bool automatic = false;
     bool fire = false;
@@ -61,7 +63,6 @@ struct ShootState {
     uint16_t cooling_value = 0U;
     uint16_t heat_limit = 0U;
     uint16_t heat = 0U;
-    uint32_t aim_lost_time = 0U;
     uint32_t block_time = 0U;
     uint32_t reverse_time = 0U;
     uint32_t shoot_time = 0U;
@@ -140,16 +141,6 @@ bool ShootInit()
     return true;
 }
 
-bool sentry_fric_ready()
-{
-    for (size_t i = 0; i < kFricCount; ++i) {
-        if (fabsf(SHOOT.fdb.fric_speed[i] - kFricSpeedRadS[i]) > kFricSpeedErrorRadS) {
-            return false;
-        }
-    }
-    return true;
-}
-
 void ShootObserver()
 {
     const auto system = LuojiaFox::system_state.read();
@@ -178,23 +169,31 @@ void ShootObserver()
                                   SHOOT.fric_at_speed;
         }
     }
-    // 过通道时小云台会折叠，发射任务让出机构。
-    SHOOT.stop_requested = SHOOT.stop_requested ||
-        system.gimbal.mode == static_cast<uint8_t>(gimbal::Mode::kPassage) ||
-        system.gimbal.mode == static_cast<uint8_t>(gimbal::Mode::kFault);
+    const bool command_fresh = !system.usb_link.offline &&
+        system.robot_cmd.last_update_ms != 0U &&
+        now - system.robot_cmd.last_update_ms < kRobotCmdTimeoutMs;
     SHOOT.automatic = !rc_online || SWITCH_IS_MID(sw);
-    SHOOT.fire = !system.usb_link.offline && system.robot_cmd.last_update_ms != 0U &&
-        now - system.robot_cmd.last_update_ms < kRobotCmdTimeoutMs && system.robot_cmd.fire != 0U;
+    SHOOT.fire = command_fresh && system.robot_cmd.fire != 0U;
+    SHOOT.sentry_fric_cmd = command_fresh && system.robot_cmd.fric_on != 0U;
 
-    // 中档与遥控离线共用 SENTRY 的自动分支，丢火控后维持摩擦轮 3 s。
-    if (SHOOT.automatic && !SHOOT.fire) {
-        if (SHOOT.aim_lost_time < kAimLostMs) {
-            SHOOT.aim_lost_time += kControlMs;
-        }
-    } else {
-        SHOOT.aim_lost_time = 0U;
+    // 故障只由明确停机指令清除；断联或云台异常不能自动解除锁定。
+    const bool host_stop = SHOOT.automatic && command_fresh &&
+        system.robot_cmd.fire == 0U && system.robot_cmd.fric_on == 0U;
+    if (SHOOT.stop_requested || host_stop) {
+        SHOOT.output_fault = false;
     }
-    SHOOT.sentry_fric_cmd = SHOOT.aim_lost_time < kAimLostMs;
+
+    board_link::BigYawFeedback big_yaw {};
+    board_link::getPeerBigYawFeedback(big_yaw);
+    const auto& gimbal_state = system.gimbal;
+    const bool gimbal_ready = gimbal_state.updated_at_ms != 0U &&
+        now - gimbal_state.updated_at_ms < GIMBAL_IMU_TIMEOUT_MS &&
+        gimbal_state.online && gimbal_state.ready && big_yaw.ready &&
+        gimbal_state.transform_state == LuojiaFox::GimbalTransformState::Ready &&
+        gimbal_state.mode != static_cast<uint8_t>(gimbal::Mode::kPassage) &&
+        gimbal_state.mode != static_cast<uint8_t>(gimbal::Mode::kFault) &&
+        gimbal_state.mode != static_cast<uint8_t>(gimbal::Mode::kZeroForce);
+    SHOOT.stop_requested = SHOOT.stop_requested || !gimbal_ready;
 
     SHOOT.heat_fresh = peer_online && power.online && power.power_received &&
         power.buffer_received && now - power.power_tick < kRefereeTimeoutMs &&
@@ -206,7 +205,7 @@ void ShootObserver()
 
 void ShootHandleException()
 {
-    const bool inhibited = !SHOOT.motors_online;
+    const bool inhibited = !SHOOT.motors_online || SHOOT.stop_requested || SHOOT.output_fault;
     if (inhibited && !SHOOT.inhibited) {
         ResetSpeedLoop(SHOOT.trigger_loop);
         for (SpeedLoop& loop : SHOOT.fric_loop) {
@@ -226,7 +225,7 @@ void ShootSetMode()
 
     if (SHOOT.automatic) {
         if (SHOOT.sentry_fric_cmd) {
-            SHOOT.state = sentry_fric_ready() ? FRIC_READY : FRIC_ON;
+            SHOOT.state = SHOOT.fric_at_speed ? FRIC_READY : FRIC_ON;
         }
         if (SHOOT.fire && SHOOT.state == FRIC_READY) {
             SHOOT.mode = LOAD_BURSTFIRE;
@@ -375,6 +374,7 @@ void ShootSendCmd()
 {
     if (!DjiMotor::sendGroup(motorBus(), kTxIdentifier)) {
         ++SHOOT.tx_failures;
+        SHOOT.output_fault = true;
     }
 }
 
@@ -385,7 +385,7 @@ void ShootPublish()
         mean_speed += fabsf(speed) / kFricCount;
     }
     const uint16_t rpm = static_cast<uint16_t>(mean_speed * 60.0f / kTwoPi);
-    const bool ready = !SHOOT.inhibited && SHOOT.heat_fresh && SHOOT.fric_at_speed &&
+    const bool ready = !SHOOT.inhibited && !SHOOT.output_fault && SHOOT.heat_fresh && SHOOT.fric_at_speed &&
         SHOOT.state == FRIC_READY && SHOOT.mode != LOAD_BLOCK;
     LuojiaFox::system_state.updateShooter({rpm, 0U, ready});
 }

@@ -4,14 +4,15 @@
  * @copyright WHU-LuojiaFox (c) 2026
  *
  * 该模块根据四个全向轮的线速度和底盘坐标系下的 IMU 加速度，
- * 使用恒加速度模型卡尔曼滤波估计车体 vx/vy，并可按 Yaw 角速度生成
+ * 在内部固定参考系中使用恒加速度模型估计速度，再转到输出坐标系，
+ * 并可按 Yaw 角速度生成
  * 一个可选的期望速度补偿量。
  *
  * @attention
  * 1. 模块只做算法计算，不直接读取电机、IMU 或 CAN；由 app_chassis 组装输入。
  * 2. 输入的轮速必须是逻辑轮序 1~4 的轮缘线速度，单位 m/s。
  * 3. 输入的加速度必须已经转换到底盘平面坐标系并去除重力，单位 m/s²。
- * 4. 轮子是否打滑由调用方判断；至少三个轮子有效时才进行轮速逆解。
+ * 4. 模块根据预测残差检测打滑；至少三个可靠轮速才进行轮速校正。
  */
 
 #pragma once
@@ -30,7 +31,7 @@ constexpr uint8_t kAllWheelsValidMask = 0x0FU;
  * @brief 卡尔曼滤波与目标补偿参数。
  */
 struct Config {
-    /** @brief 加速度过程噪声谱密度，单位约为 m²/s⁵。 */
+    /** @brief 连续白噪声加加速度（jerk）的谱密度，单位 m²/s⁵。 */
     float acceleration_process_noise;
 
     /** @brief 轮速逆解速度测量方差，(m/s)²。 */
@@ -93,7 +94,7 @@ struct Measurement {
     uint8_t valid_wheel_mask = 0U;
 
     /**
-     * @brief 期望坐标系相对底盘坐标系的 Yaw 角，rad。
+     * @brief 底盘向量转到输出坐标系时使用的旋转角，rad。
      * @note 正负方向必须与文档公式及实车 IMU 安装方向一致。
      */
     float yaw_rad = 0.0f;
@@ -101,8 +102,8 @@ struct Measurement {
     /** @brief 本周期 Yaw 角速度，rad/s。 */
     float yaw_rate_rad_s = 0.0f;
 
-    /** @brief 轮半径，m；用于计算旋转产生的轮缘线速度。 */
-    float wheel_radius_m = 0.0f;
+    /** @brief 轮心到底盘中心的距离，m；切向安装时为底盘旋转力臂。 */
+    float wheel_center_distance_m = 0.0f;
 
     /** @brief 底盘坐标系 x 轴加速度，m/s²，已去除重力。 */
     float acceleration_x_mps2 = 0.0f;
@@ -216,7 +217,7 @@ public:
      * @param target_vy_mps 期望 y 向速度，m/s。
      * @return 补偿后的目标速度及实际补偿量。
      * @note 公式为 target + K*|yaw_rate|*(target-estimate)。
-     *       该补偿本质上是误差放大，默认未接入控制系统。
+     *       该补偿本质上是误差放大，由应用配置决定是否接入。
      */
     CorrectedVelocity compensate(float target_vx_mps, float target_vy_mps) const;
 
@@ -233,7 +234,7 @@ public:
      * @brief 直接由四个轮速和一个 Yaw 角解算 vx/vy。
      * @param wheel_linear_velocity_mps 四轮轮缘线速度，m/s。
      * @param valid_mask 有效轮位图，至少需要三个有效轮。
-     * @param yaw_rad 期望坐标系相对底盘坐标系的 Yaw 角，rad。
+     * @param yaw_rad 底盘向量转到输出坐标系时使用的旋转角，rad。
      * @param vx_mps 输出 x 向速度，m/s。
      * @param vy_mps 输出 y 向速度，m/s。
      * @return 解算成功时返回 true。
@@ -274,7 +275,7 @@ private:
      * @brief 使用逐轮置信度对轮速逆解进行加权最小二乘求解。
      * @param[in] wheel_linear_velocity_mps 四轮轮缘线速度，m/s。
      * @param[in] valid_mask 传感器有效性位图。
-     * @param[in] yaw_rad 期望坐标系相对底盘坐标系的 Yaw 角，rad。
+     * @param[in] yaw_rad 底盘向量转到输出坐标系时使用的旋转角，rad。
      * @param[in] confidence 逐轮置信度，范围为 0~1。
      * @param[out] vx_mps 加权解算的 x 向速度，m/s。
      * @param[out] vy_mps 加权解算的 y 向速度，m/s。
@@ -310,6 +311,9 @@ private:
     Config config_ {};
     AxisFilter vx_axis_ {};
     AxisFilter vy_axis_ {};
+    // 积分底盘转角，使速度与加速度在同一固定参考系中融合。
+    float heading_rad_ = 0.0f;
+    float output_rotation_rad_ = 0.0f;
     float yaw_rate_rad_s_ = 0.0f;
     uint8_t valid_wheel_mask_ = 0U;
     bool configured_ = false;

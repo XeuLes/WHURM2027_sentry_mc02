@@ -1,6 +1,7 @@
 // 主控直驱小 Yaw、Roll 和 Pitch。
 #include "app_gimbal.h"
 #include "app_board_link.hpp"
+#include "chassis_config.hpp"
 #include "lf_core.hpp"
 #include "fdcan.h"
 #include "cmsis_os.h"
@@ -22,7 +23,11 @@ struct PassageControl {
     float yaw_goal = 0, pitch_goal = GIMBAL_PASS_PITCH_RAD;
     uint32_t stage_start = 0, settled_ms = 0, entry_feedback_revision = 0;
     bool center_confirmed = false, rearmed = false;
+    bool manual = false;
+    bool recovering = false;
 } passage;
+bool manual_aligning = false;
+uint32_t manual_align_started_ms = 0;
 LuojiaFox::GimbalShape completed_shape = LuojiaFox::GimbalShape::Unknown;
 bool initialized = false;
 bool calibrated = false, init_failed = false;
@@ -48,7 +53,10 @@ struct ControlCycle {
     bool imu_ok = false;
     bool passage_requested = false;
     bool navigation_control = false;
+    bool navigation_heading_ready = false;
     bool chassis_stopped = false;
+    bool manual_heading_ready = false;
+    bool chassis_aligned = false;
     Mode normal_mode = Mode::kZeroForce;
     bool big_yaw_centered = false;
     uint32_t big_yaw_feedback_revision = 0;
@@ -161,11 +169,14 @@ void publish(const ControlCycle& cycle) {
     using LuojiaFox::GimbalShape;
     using LuojiaFox::GimbalTransformState;
     state.transformed = completed_shape;
+    state.manual_passage = manual_aligning || (passage.manual && passage.stage != PassageStage::kIdle);
+    state.manual_passage_aligning = manual_aligning;
+    state.manual_passage_recovering = passage.recovering;
     if (mode == Mode::kFault || init_failed || passage.stage == PassageStage::kFault) {
         state.transform_state = GimbalTransformState::Fault;
     } else if (mode == Mode::kZeroForce || !cycle.online || !cycle.peer_online) {
         state.transform_state = GimbalTransformState::Disabled;
-    } else if (passage.stage == PassageStage::kAlign || passage.stage == PassageStage::kFold) {
+    } else if (manual_aligning || passage.stage == PassageStage::kAlign || passage.stage == PassageStage::kFold) {
         state.transform_state = GimbalTransformState::Preparing;
     } else if (passage.stage == PassageStage::kUnfold) {
         state.transform_state = GimbalTransformState::Restoring;
@@ -200,16 +211,16 @@ void selectControlRequest(ControlCycle& cycle, const LuojiaFox::RobotCmdState& c
     }
 
     cycle.navigation_control = robot_cmd_seen;
+    cycle.navigation_heading_ready = robot_cmd_seen && cmd.chassis_enabled && cmd.heading_valid &&
+        cycle.now - cmd.last_update_ms < chassis_app::kAutoCommandTimeoutMs;
     cycle.passage_requested = cmd.passage_requested;
     cycle.aim_yaw = cmd.gimbal_yaw;
     cycle.aim_pitch = cmd.gimbal_pitch;
-    const bool fresh_aim = robot_cmd_seen &&
+    const bool fresh_aim = robot_cmd_seen && cmd.aim_valid &&
         cycle.now - cmd.last_update_ms < GIMBAL_AIM_TIMEOUT_MS &&
         isfinite(cycle.aim_yaw) && isfinite(cycle.aim_pitch);
-    const bool tracking = cmd.gimbal_aim_changed_ms != 0U &&
-        cycle.now - cmd.gimbal_aim_changed_ms < GIMBAL_AIM_LOST_MS;
     const Mode scan_mode = mode == Mode::kGap || mode == Mode::kScan ? Mode::kScan : Mode::kGap;
-    cycle.normal_mode = fresh_aim && tracking ? Mode::kAutoAim : scan_mode;
+    cycle.normal_mode = fresh_aim ? Mode::kAutoAim : scan_mode;
 }
 
 void observe(ControlCycle& cycle) {
@@ -238,6 +249,11 @@ void observe(ControlCycle& cycle) {
     cycle.peer_online = board_link::getPeerBigYawFeedback(big_yaw);
     cycle.big_yaw_centered = big_yaw.ready && gimbal::bigYawCentered();
     cycle.big_yaw_feedback_revision = big_yaw.revision;
+    if (manual_aligning || passage.manual) {
+        cycle.manual_heading_ready = big_yaw.ready && gimbal::manualPassageHeadingReady();
+        cycle.chassis_aligned = big_yaw.motor_online &&
+            fabsf(big_yaw.joint_rad) <= GIMBAL_PASS_CHASSIS_ALIGN_TOL_RAD;
+    }
     cycle.rc_online = !getRcOffline();
     bool aux_passage = false;
     const RcControl* rc = getRemoteControlPoint();
@@ -251,15 +267,21 @@ void observe(ControlCycle& cycle) {
     selectControlRequest(cycle, state.robot_cmd, aux_passage);
     cycle.chassis_stopped = state.chassis.valid &&
         cycle.now - state.chassis.last_update_ms < board_link::can3::kChassisFeedbackTimeoutMs &&
-        hypotf(state.chassis.vx, state.chassis.vy) <= 0.05f && fabsf(state.chassis.wz) <= 0.10f;
+        hypotf(state.chassis.vx, state.chassis.vy) <= chassis_app::kPassageStoppedSpeed &&
+        fabsf(state.chassis.wz) <= chassis_app::kPassageStoppedWz;
 
     const bool mechanical_mode = mode == Mode::kPassage || passage.stage == PassageStage::kFault ||
-                                 cycle.passage_requested;
+                                 (cycle.navigation_control && cycle.passage_requested);
     cycle.online = cycle.yaw_joint_online && pitch_ok && roll_ok && (mechanical_mode || imu_ok);
 }
 
 void handleException(ControlCycle& cycle) {
+    if (passage.manual && (!cycle.rc_online || cycle.sw != RC_SW_MID)) {
+        // Keep the manual passage latched until its owner can recover the mechanism.
+        cycle.normal_mode = Mode::kZeroForce;
+    }
     if (cycle.normal_mode == Mode::kZeroForce || !cycle.online || !cycle.peer_online) {
+        manual_aligning = false;
         if (mode == Mode::kPassage ||
             fabsf(roll.joint - GIMBAL_ROLL_UPRIGHT_RAD) > GIMBAL_PASS_POSITION_TOL_RAD) {
             latchPassageFault();
@@ -307,7 +329,7 @@ void failPassage(const ControlCycle& cycle) {
 
 void updatePassageStage(const ControlCycle& cycle) {
     // A restore request brakes the chassis before moving the folded assembly.
-    if (cycle.navigation_control && !cycle.passage_requested && !cycle.chassis_stopped &&
+    if (!cycle.passage_requested && !cycle.chassis_stopped &&
         (passage.stage == PassageStage::kAlign || passage.stage == PassageStage::kFold ||
          passage.stage == PassageStage::kHold)) { return; }
     if (!cycle.passage_requested && passage.stage == PassageStage::kAlign) {
@@ -322,6 +344,8 @@ void updatePassageStage(const ControlCycle& cycle) {
         if (!cycle.passage_requested && cycle.imu_ok) {
             calibrated = true;
             passage.stage = PassageStage::kIdle;
+            passage.manual = false;
+            passage.recovering = false;
             setMode(cycle.normal_mode, cycle.yaw, cycle.pitch);
         }
         return;
@@ -347,7 +371,8 @@ void updatePassageStage(const ControlCycle& cycle) {
     passage.settled_ms = settled ? passage.settled_ms + GIMBAL_PERIOD_MS : 0;
     const uint32_t settle_ms = passage.stage == PassageStage::kAlign ?
         GIMBAL_PASS_SETTLE_MS : GIMBAL_PASS_ROLL_SETTLE_MS;
-    if (passage.center_confirmed && passage.settled_ms >= settle_ms) {
+    const bool chassis_ready = passage.stage != PassageStage::kAlign || cycle.chassis_stopped;
+    if (passage.center_confirmed && passage.settled_ms >= settle_ms && chassis_ready) {
         switch (passage.stage) {
         case PassageStage::kAlign:
             setPassageStage(PassageStage::kFold, cycle.now);
@@ -372,18 +397,55 @@ void selectMode(ControlCycle& cycle) {
     if (cycle.stop) { return; }
     if (passage.stage == PassageStage::kFault) {
         // Reaching this point means the explicit recovery request was armed.
+        if (!cycle.chassis_stopped) { return; }
+        passage.manual = true;
+        passage.recovering = true;
         startPassage(cycle, PassageStage::kUnfold, yaw.joint, pitch.joint);
         return;
     }
-    if (mode == Mode::kPassage) { updatePassageStage(cycle); return; }
+    if (mode == Mode::kPassage) {
+        if (passage.manual && !passage.recovering && !cycle.manual_heading_ready) {
+            failPassage(cycle);
+            return;
+        }
+        updatePassageStage(cycle);
+        return;
+    }
+    if (cycle.normal_mode != Mode::kManual || !cycle.passage_requested) {
+        manual_aligning = false;
+    }
     // A folded assembly must not be straightened by ordinary initialization.
     if (fabsf(roll.joint - GIMBAL_ROLL_UPRIGHT_RAD) > GIMBAL_PASS_POSITION_TOL_RAD) {
+        manual_aligning = false;
         failPassage(cycle); return;
     }
-    if (cycle.passage_requested) {
-        if (cycle.navigation_control && !cycle.chassis_stopped) { return; }
+    if (cycle.navigation_control && cycle.passage_requested) {
+        if (!cycle.navigation_heading_ready || !cycle.chassis_stopped) { return; }
+        passage.manual = false;
+        passage.recovering = false;
         startPassage(cycle, PassageStage::kAlign, 0.0f, GIMBAL_PASS_PITCH_RAD);
         return;
+    }
+    if (cycle.normal_mode == Mode::kManual && cycle.passage_requested) {
+        if (!manual_aligning) {
+            manual_aligning = true;
+            manual_align_started_ms = cycle.now;
+        }
+        if (calibrated && cycle.manual_heading_ready && cycle.chassis_aligned &&
+            cycle.chassis_stopped && cycle.big_yaw_centered) {
+            manual_aligning = false;
+            passage.manual = true;
+            passage.recovering = false;
+            startPassage(cycle, PassageStage::kAlign, 0.0f, GIMBAL_PASS_PITCH_RAD);
+            return;
+        }
+        if (cycle.now - manual_align_started_ms >= GIMBAL_PASS_PHASE_TIMEOUT_MS) {
+            manual_aligning = false;
+            passage.manual = true;
+            passage.recovering = false;
+            failPassage(cycle);
+            return;
+        }
     }
     if (!calibrated) {
         if (mode != Mode::kInit) {
@@ -440,7 +502,7 @@ void updateReference(ControlCycle& cycle) {
             init_failed = true;
             setMode(Mode::kFault, cycle.yaw, cycle.pitch);
         }
-    } else if (mode == Mode::kManual) {
+    } else if (mode == Mode::kManual && !manual_aligning) {
         pitch.target -= stick(cycle.rc_pitch) * GIMBAL_MANUAL_PITCH_RAD_S * kDt;
     } else if (mode == Mode::kScan) {
         yaw.target = 0.0f;

@@ -65,7 +65,7 @@
  * @brief yaw 轴陀螺死区（rad/s），低于此值视为静止直接清零
  */
 #ifndef BMI088_GYRO_Z_DEADBAND
-#define BMI088_GYRO_Z_DEADBAND 0.012f
+#define BMI088_GYRO_Z_DEADBAND 0.0f // 保留真实低速转动，零偏由驱动标定处理
 #endif
 
 /**

@@ -65,6 +65,9 @@ struct GimbalState
     float joint_roll_rad = 0;
     GimbalTransformState transform_state = GimbalTransformState::Disabled;
     GimbalShape transformed = GimbalShape::Unknown;
+    bool manual_passage = false;          // CH5 启动的过洞流程，回正结束前保持
+    bool manual_passage_aligning = false; // 底盘正在对齐锁定的大 Yaw 航向
+    bool manual_passage_recovering = false; // 故障后的机械回中与回正
 };
 
 struct ShooterState
@@ -96,7 +99,7 @@ struct RobotCmdState
     uint8_t fric_on;
     uint32_t last_update_ms;
     bool passage_requested = false; // 由折叠/回正命令锁存
-    uint32_t gimbal_aim_changed_ms = 0U;
+    bool aim_valid = false; // 上位机本帧自瞄目标有效
     float big_yaw_heading_rad = 0.0f;
     bool chassis_enabled = false;
     bool heading_valid = false;

@@ -21,6 +21,10 @@ float estimated_joint_velocity = 0.0f;
 float target_rad = 0.0f;
 float navigation_heading_rad = 0.0f;
 bool navigation_heading_latched = false;
+float manual_heading_rad = 0.0f;
+bool manual_heading_latched = false;
+bool manual_heading_ready = false;
+uint32_t manual_heading_update_ms = 0;
 JointTrajectory passage_path;
 uint32_t passage_centered_ms = 0;
 bool passage_yaw_centered = false;
@@ -36,6 +40,8 @@ struct ControlCycle {
     float small_yaw_offset = 0;
     bool imu_ok = false;
     bool navigation_heading = false;
+    bool manual_passage = false;
+    bool mechanical_recovery = false;
     bool small_yaw_online = false;
     bool rc_online = false;
     bool stop = false;
@@ -45,18 +51,41 @@ struct ControlCycle {
     Mode small_mode = Mode::kZeroForce;
 };
 
-void setMode(Mode next, float yaw_position) {
+bool useJointFrame(Mode selected, const ControlCycle& cycle) {
+    return selected == Mode::kPassage && cycle.mechanical_recovery;
+}
+
+void setMode(Mode next, const ControlCycle& cycle) {
     if (mode == next) { return; }
     mode = next;
-    target_rad = mode == Mode::kPassage ? yaw.joint_rad : yaw_position;
     passage_centered_ms = 0;
-    if (mode == Mode::kPassage) {
+    target_rad = cycle.yaw_position;
+    if (useJointFrame(mode, cycle)) {
+        target_rad = yaw.joint_rad;
         passage_path.reset(yaw.joint_rad, estimated_joint_velocity);
     }
 }
 
+bool hasPassageHeading(const ControlCycle& cycle) {
+    return cycle.manual_passage ? manual_heading_latched : cycle.navigation_heading;
+}
+
+float passageHeading(const ControlCycle& cycle) {
+    return cycle.manual_passage ? manual_heading_rad : navigation_heading_rad;
+}
+
+void updateManualHeading(const ControlCycle& cycle) {
+    if (!cycle.manual_passage) {
+        manual_heading_latched = false;
+    } else if (!manual_heading_latched && cycle.imu_ok) {
+        manual_heading_rad = wrap(cycle.yaw_position);
+        manual_heading_latched = true;
+        passage_centered_ms = 0;
+    }
+}
+
 void publishTarget(const ControlCycle& cycle) {
-    const bool joint_frame = mode == Mode::kPassage && !cycle.navigation_heading;
+    const bool joint_frame = useJointFrame(mode, cycle);
     const bool holding_center = passage_centered_ms >= GIMBAL_PASS_BIG_YAW_SETTLE_MS;
     board_link::publishBigYawTarget({
         wrap(target_rad),
@@ -77,7 +106,7 @@ void publishDebug(const ControlCycle& cycle) {
     g_big_yaw_debug.pitch_rad = cycle.pitch;
     g_big_yaw_debug.joint_yaw_rad = yaw.joint_rad;
     g_big_yaw_debug.target_yaw_rad = target_rad;
-    g_big_yaw_debug.joint_control = mode == Mode::kPassage && !cycle.navigation_heading;
+    g_big_yaw_debug.joint_control = useJointFrame(mode, cycle);
     g_big_yaw_debug.ready = !cycle.stop && !init_failed &&
                     mode != Mode::kFault && mode != Mode::kZeroForce;
     g_big_yaw_debug.following = mode == Mode::kFollow;
@@ -89,10 +118,11 @@ void updatePassageCentered(const ControlCycle& cycle) {
     bool centered = false;
     if (!cycle.stop && !init_failed && mode == Mode::kPassage) {
         if (passage_centered_ms < GIMBAL_PASS_BIG_YAW_SETTLE_MS) {
-            const bool reference_settled = cycle.navigation_heading ?
-                fabsf(wrap(navigation_heading_rad - cycle.yaw_position)) < GIMBAL_PASS_POSITION_TOL_RAD :
+            const bool reference_settled = useJointFrame(mode, cycle) ?
                 (fabsf(passage_path.position) < GIMBAL_PASS_POSITION_TOL_RAD &&
-                 fabsf(passage_path.velocity) < GIMBAL_PASS_SPEED_TOL_RAD_S);
+                 fabsf(passage_path.velocity) < GIMBAL_PASS_SPEED_TOL_RAD_S) :
+                (hasPassageHeading(cycle) &&
+                 fabsf(wrap(passageHeading(cycle) - cycle.yaw_position)) < GIMBAL_PASS_POSITION_TOL_RAD);
             const bool settled = fabsf(yaw.joint_rad) < GIMBAL_PASS_POSITION_TOL_RAD &&
                 yaw.slow && reference_settled;
             passage_centered_ms = settled ? passage_centered_ms + GIMBAL_PERIOD_MS : 0;
@@ -152,6 +182,8 @@ void observe(ControlCycle& cycle) {
         taskEXIT_CRITICAL();
     }
     cycle.small_mode = static_cast<Mode>(state.gimbal.mode);
+    cycle.mechanical_recovery = state.gimbal.manual_passage_recovering;
+    cycle.manual_passage = state.gimbal.manual_passage && !cycle.mechanical_recovery;
     const bool automatic = !cycle.rc_online || cycle.sw == RC_SW_UP;
     const auto& cmd = state.robot_cmd;
     const bool heading_fresh = automatic && cmd.chassis_enabled && cmd.heading_valid &&
@@ -162,7 +194,8 @@ void observe(ControlCycle& cycle) {
     } else if (cycle.small_mode != Mode::kPassage) {
         navigation_heading_latched = false;
     }
-    cycle.navigation_heading = automatic && navigation_heading_latched;
+    cycle.navigation_heading = navigation_heading_latched &&
+        !state.gimbal.manual_passage && (automatic || cycle.small_mode == Mode::kPassage);
     cycle.small_yaw_offset = state.gimbal.joint_yaw_rad;
     cycle.small_yaw_online = state.gimbal.yaw_joint_online && isfinite(cycle.small_yaw_offset);
 }
@@ -191,12 +224,13 @@ Mode selectAutomaticMode(const ControlCycle& cycle) {
 }
 
 Mode selectMode(const ControlCycle& cycle) {
+    if ((cycle.manual_passage || cycle.mechanical_recovery) &&
+        (!cycle.rc_online || cycle.sw != RC_SW_MID)) { return Mode::kZeroForce; }
     if (!cycle.rc_online) { return selectAutomaticMode(cycle); }
 
     switch (cycle.sw) {
     case RC_SW_MID:
-        // Keep the heading locked until the small gimbal completes passage.
-        return cycle.small_mode == Mode::kPassage ? Mode::kPassage : Mode::kManual;
+        return cycle.manual_passage || cycle.small_mode == Mode::kPassage ? Mode::kPassage : Mode::kManual;
     case RC_SW_UP:
         return selectAutomaticMode(cycle);
     default:
@@ -205,20 +239,19 @@ Mode selectMode(const ControlCycle& cycle) {
 }
 
 void handleException(ControlCycle& cycle, Mode next) {
-    const bool feedback_ok = yaw.motor_online &&
-        ((next == Mode::kPassage && !cycle.navigation_heading) || cycle.imu_ok);
+    const bool feedback_ok = yaw.motor_online && (useJointFrame(next, cycle) || cycle.imu_ok);
     if (next == Mode::kZeroForce || cycle.small_mode == Mode::kFault ||
         !feedback_ok) {
         if (cycle.rc_online && cycle.sw == RC_SW_DOWN) {
             init_failed = false;
         }
-        setMode(Mode::kZeroForce, cycle.yaw_position);
+        setMode(Mode::kZeroForce, cycle);
         cycle.stop = true;
         return;
     }
     if (!yaw.ready && mode != Mode::kZeroForce) { init_failed = true; }
     if (init_failed) {
-        setMode(Mode::kFault, cycle.yaw_position);
+        setMode(Mode::kFault, cycle);
         cycle.stop = true;
         return;
     }
@@ -228,12 +261,13 @@ void handleException(ControlCycle& cycle, Mode next) {
 
 void updateReference(ControlCycle& cycle) {
     if (cycle.stop) { return; }
-    if (cycle.navigation_heading) {
-        target_rad = wrap(target_rad + clamp(wrap(navigation_heading_rad - target_rad),
+    if (hasPassageHeading(cycle)) {
+        const float heading = passageHeading(cycle);
+        target_rad = wrap(target_rad + clamp(wrap(heading - target_rad),
             -GIMBAL_PASS_BIG_YAW_SPEED_RAD_S * kDt, GIMBAL_PASS_BIG_YAW_SPEED_RAD_S * kDt));
         return;
     }
-    if (mode == Mode::kPassage) {
+    if (useJointFrame(mode, cycle)) {
         if (passage_centered_ms >= GIMBAL_PASS_BIG_YAW_SETTLE_MS) {
             target_rad = 0.0f;
             return;
@@ -267,6 +301,14 @@ bool bigYawCentered() {
     taskEXIT_CRITICAL();
     return centered;
 }
+
+bool manualPassageHeadingReady() {
+    taskENTER_CRITICAL();
+    const bool ready = manual_heading_ready &&
+        HAL_GetTick() - manual_heading_update_ms < board_link::can3::kBigYawTimeoutMs;
+    taskEXIT_CRITICAL();
+    return ready;
+}
 } // namespace gimbal
 
 extern "C" bool Gimbal_Init(void) {
@@ -278,15 +320,19 @@ extern "C" void Gimbal_Control(void) {
     controlSmallGimbal();
     ControlCycle cycle{};
     observe(cycle);
+    updateManualHeading(cycle);
     const Mode next = selectMode(cycle);
     handleException(cycle, next);
     if (!cycle.stop) {
-        const bool enter_navigation_passage = next == Mode::kPassage && mode != next && cycle.navigation_heading;
-        setMode(next, cycle.yaw_position);
-        if (enter_navigation_passage) { target_rad = cycle.yaw_position; }
+        setMode(next, cycle);
     }
     updateReference(cycle);
     publishTarget(cycle);
+    taskENTER_CRITICAL();
+    manual_heading_ready = mode == Mode::kPassage && cycle.manual_passage &&
+        manual_heading_latched && !cycle.stop && !init_failed;
+    manual_heading_update_ms = cycle.now;
+    taskEXIT_CRITICAL();
     updatePassageCentered(cycle);
     publishDebug(cycle);
 }

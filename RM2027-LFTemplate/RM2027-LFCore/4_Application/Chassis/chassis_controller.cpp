@@ -40,7 +40,7 @@ float wheelAngularVelocity(
     }
 
     // 纯旋转时各轮轮缘线速度为 -R*wz。
-    return -sum / (static_cast<float>(count) * kWheelRadius);
+    return -sum / (static_cast<float>(count) * kWheelCenterDistance);
 }
 
 } // namespace
@@ -187,11 +187,12 @@ ChassisFeedback ChassisController::readFeedback(
         measurement.wheel_linear_velocity_mps[i] = feedback.wheel_linear[i];
     }
     measurement.valid_wheel_mask = feedback.valid_wheel_mask;
+    // 控制目标和反馈均为底盘系；融合器内部处理底盘旋转。
     measurement.yaw_rad = 0.0f;
     measurement.yaw_rate_rad_s =
         imu_fresh ? imu.yaw_rate_dps * BASIC_MATH_DEG_TO_RAD : 0.0f;
     measurement.yaw_rate_valid = imu_fresh;
-    measurement.wheel_radius_m = kWheelRadius;
+    measurement.wheel_center_distance_m = kWheelCenterDistance;
     measurement.acceleration_x_mps2 =
         imu_fresh ? imu.acceleration_x_mps2 : 0.0f;
     measurement.acceleration_y_mps2 =

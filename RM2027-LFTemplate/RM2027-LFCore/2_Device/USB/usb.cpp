@@ -819,14 +819,7 @@ void Usb::UpdateRobotCmd(void)
     const bool aim_valid = (nav.flags & ROBOT_CMD_AIM_VALID) != 0U;
     const float yaw_target = aim_valid ? receive_robot_cmd.data.gimbal.yaw : 0.0f;
     const float pitch_target = aim_valid ? receive_robot_cmd.data.gimbal.pitch : 0.0f;
-    if (aim_valid) {
-        // Aim activity follows changes in the received target.
-        const bool changed = state.robot_cmd.gimbal_aim_changed_ms == 0U ||
-                             yaw_target != robot_cmd.gimbal.yaw ||
-                             pitch_target != robot_cmd.gimbal.pitch;
-        cmd.gimbal_aim_changed_ms = changed ? robot_cmd_receive_time :
-                                             state.robot_cmd.gimbal_aim_changed_ms;
-    }
+    cmd.aim_valid = aim_valid;
     robot_cmd.gimbal.yaw = yaw_target;
     robot_cmd.gimbal.pitch = pitch_target;
 

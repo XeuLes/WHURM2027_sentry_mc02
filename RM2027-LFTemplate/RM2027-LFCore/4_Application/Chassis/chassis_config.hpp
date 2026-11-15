@@ -32,6 +32,10 @@ constexpr float kPowerSafetyMargin = 0.90f;
 constexpr float kMaxVx = 1.0f;
 constexpr float kMaxVy = 1.0f;
 constexpr float kMaxWz = 2.0f;
+constexpr float kPassageAlignGain = 2.0f;       // 将大 Yaw 机械偏角换成底盘目标角速度
+constexpr float kPassageAlignMaxWz = 1.5f;      // 过洞对齐角速度上限，rad/s
+constexpr float kPassageStoppedSpeed = 0.05f;  // m/s
+constexpr float kPassageStoppedWz = 0.10f;      // rad/s
 constexpr float kMaxFx = 70.0f;
 constexpr float kMaxFy = 70.0f;
 constexpr float kMaxMz = 12.0f;
@@ -58,7 +62,7 @@ constexpr float kSlipEnterHoldS = 0.005f;
 constexpr float kSlipExitHoldS = 0.020f;
 
 // 坡道重力前馈。整车质量标定前保持为 0，算法输出补偿力为零。
-constexpr bool kEnableGravityCompensation = true;
+constexpr bool kEnableGravityCompensation = false; // 质量、IMU 安装未标定前不启用
 constexpr float kGravityCompensationMassKg = 0.0f;
 constexpr float kGravityMps2 = 9.718f;
 constexpr float kGravityScaleX = 1.0f;

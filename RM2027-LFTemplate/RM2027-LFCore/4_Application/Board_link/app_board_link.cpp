@@ -104,7 +104,8 @@ void exchangeTargets() {
 
     // ROS navigation supplies chassis-frame velocity. Only manual RC translation
     // follows the muzzle frame; subControl always receives chassis coordinates.
-    if (chassis_target.valid && chassis_target.mode == CHASSIS_MODE_DIRECT_RC) {
+    if (chassis_target.valid && chassis_target.mode == CHASSIS_MODE_DIRECT_RC &&
+        !chassis_target.motion_blocked) {
         const float offset_rad = yaw_target.muzzle_to_chassis_rad;
         const bool offset_ok = now - yaw_target.updated_at_ms < kBigYawTimeoutMs &&
             yaw_target.big_yaw_offset_valid && yaw_target.muzzle_offset_valid &&

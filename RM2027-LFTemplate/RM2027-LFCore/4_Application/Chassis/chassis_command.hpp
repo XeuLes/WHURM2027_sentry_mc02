@@ -25,20 +25,21 @@ struct ChassisCommandSelection {
     ChassisCommand command {};
     ChassisModeTypedef mode = CHASSIS_MODE_AUTO_VISION;
     bool mode_changed = false;
+    bool motion_blocked = false; // 有效命令保持零速度闭环
 };
 
 class ChassisCommandSelector {
 public:
     /**
      * @brief 更新底盘模式并读取当前控制源命令。
-     * @param[in] robot_cmd 上位机最近一次发布的底盘命令。
+     * @param[in] state 本周期的上位机命令、云台形态与实测底盘速度。
      * @param[in] rc_online 遥控接收机当前是否在线。
      * @param[in] now_ms 当前系统时间，单位 ms。
-     * @return 本次模式、命令及模式切换标志。
+     * @return 本次模式、速度命令、模式切换和停车联锁状态。
      * @note 模式切换时返回的 command.ready 为 false，调用方应停车一个周期。
      */
     ChassisCommandSelection update(
-        const LuojiaFox::RobotCmdState& robot_cmd,
+        const LuojiaFox::SystemStateSnapshot& state,
         bool rc_online,
         uint32_t now_ms
     );

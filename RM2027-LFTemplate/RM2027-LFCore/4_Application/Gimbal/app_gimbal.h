@@ -34,6 +34,7 @@ extern DebugState g_big_yaw_debug;
 bool initSmallGimbal();
 void controlSmallGimbal();
 bool bigYawCentered();
+bool manualPassageHeadingReady();
 
 } // namespace gimbal
 #endif
