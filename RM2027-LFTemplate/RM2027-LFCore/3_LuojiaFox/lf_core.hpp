@@ -37,6 +37,7 @@ struct ImuState
     float acceleration_y_mps2;
     bool acceleration_valid;
     uint32_t last_update_ms;
+    float quaternion_wxyz[4] = {};
 };
 
 struct ChassisState
@@ -84,25 +85,27 @@ struct RefereeState
     bool connected;
 };
 
+// A1 导航指令及其在主控上的状态。
 struct RobotCmdState
 {
     float vx;
     float vy;
     float wz;
-    float chassis_roll;
-    float chassis_pitch;
-    float chassis_yaw;
-    float chassis_leg_length;
-    float gimbal_pitch;
-    float gimbal_yaw;
-    uint8_t fire;
-    uint8_t fric_on;
     uint32_t last_update_ms;
     bool passage_requested = false; // 由折叠/回正命令锁存
-    bool aim_valid = false; // 上位机本帧自瞄目标有效
     float big_yaw_heading_rad = 0.0f;
     bool chassis_enabled = false;
     bool heading_valid = false;
+};
+
+// A2 自瞄射击指令及其在主控上的状态。
+struct ShootCmdState
+{
+    float yaw = 0.0f;         // 电控世界系下期望的云台 yaw，rad
+    float pitch = 0.0f;       // 电控世界系下期望的云台 pitch，rad
+    uint8_t shoot_mode = 0U;  // 0 不发弹，1 单发，2 连发
+    uint32_t last_update_ms = 0U;
+    bool enabled = false;     // 由有效 A2 置位，断链立即清零
 };
 
 struct UsbLinkState
@@ -122,6 +125,7 @@ struct SystemStateSnapshot
     ShooterState shooter;
     RefereeState referee;
     RobotCmdState robot_cmd;
+    ShootCmdState shoot_cmd;
     UsbLinkState usb_link;
     VirtualRcState virtual_rc;
     ImuState muzzle_imu; // imu 仍是固定在大 Yaw 上的板载 INS
@@ -139,6 +143,7 @@ public:
     void updateShooter(const ShooterState &state);
     void updateReferee(const RefereeState &state);
     void updateRobotCmd(const RobotCmdState &state);
+    void updateShootCmd(const ShootCmdState &state);
     void updateUsbLink(const UsbLinkState &state);
     void updateVirtualRc(const VirtualRcState &state);
     SystemStateSnapshot read() const;

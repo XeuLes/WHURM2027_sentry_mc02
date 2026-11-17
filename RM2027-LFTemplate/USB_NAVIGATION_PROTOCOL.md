@@ -1,121 +1,45 @@
-# MC02 导航 USB 接口
+# MC02 与 NUC 的 USB 导航接口
 
-主控以一条 `RobotCmd` 接收底盘、自瞄和过洞命令。数据包定义在
-[usb_typdef.h](RM2027-LFCore/2_Device/USB/usb_typdef.h)。上位机桥接把导航和自瞄输入合成最新的一条命令。
-每个消息 ID 对应固定长度。实车桥接需要按此接口实现。
+`mainControl` 使用 `LFSentryCommon27/PROTOCOL.md` 的 USB CDC 帧格式。帧结构定义在 [usb_typdef.h](RM2027-LFCore/2_Device/USB/usb_typdef.h)。多字节字段按小端编码，长度包含帧头、长度字节、载荷和 CRC8。CRC8 初值为 0，多项式为 `0x07`，覆盖帧尾校验字节之前的全部内容。
 
-## 公共编码
-
-所有整数小端，float 为 IEEE754 binary32，结构体无对齐填充。平移速度 m/s，角度 rad，角速度 rad/s，
-已有枪口 IMU 帧 `0x02` 的单位沿用其定义。
-
-| 偏移 | 类型 | 字段 |
-| --- | --- | --- |
-| 0 | uint8 | SOF = `0x5A` |
-| 1 | uint8 | length = 总字节数 − 6 |
-| 2 | uint8 | 消息 ID |
-| 3 | uint8 | 前三字节 CRC8 |
-| 4…末尾−2 | bytes | 载荷 |
-| 末尾 2 字节 | uint16 | 前面所有字节的 CRC16 |
-
-收发复用 CDC 和现有 CRC8/CRC16 实现。USB 单次接收可以包含半帧或多帧。
-
-## 上位机 → MC02
-
-`RobotCmd` 使用 ID `0x01`，总长 **58 字节**，头为 `5A 34 01 CRC8`。
-
-| 偏移 | 类型 | 字段 | 含义 |
+| 方向 | 帧 | 总长 | 调度 |
 | --- | --- | --- | --- |
-| 0 | 4 bytes | frame_header | 通用帧头 |
-| 4 | uint32 | time_stamp | 当前桥接会话内递增的毫秒时间戳 |
-| 8/12/16 | float ×3 | data.speed_vector.vx/vy/wz | 唯一一组底盘目标速度，`chassis_link` 坐标系 |
-| 20/24/28/32 | float ×4 | data.chassis.roll/pitch/yaw/leg_lenth | RobotCmd 原有字段，全向导航填 0 |
-| 36/40 | float ×2 | data.gimbal.pitch/yaw | 枪口 IMU 参考系内的小云台目标角 |
-| 44/45 | uint8 ×2 | data.shoot.fire/fric_on | RobotCmd 原有请求字段 |
-| 46 | uint8 | data.navigation.mode | 0 普通，1 慢旋转，2 快旋转，3 折叠，4 回正 |
-| 47 | uint8 | data.navigation.flags | bit0 底盘/导航使能，bit1 洞口航向有效，bit2 小云台目标有效 |
-| 48 | uint32 | data.navigation.session | 非零桥接会话标识，进程重启换新值 |
-| 52 | float | data.navigation.heading | 主板 BMI088 惯性参考系中的大 Yaw 绝对航向，±π |
-| 56 | uint16 | checksum | CRC16 |
+| NUC → MC02 | `0xA0` SyncRequest | 7 B | 上位机请求 |
+| NUC → MC02 | `0xA1` RoboCmd | 22 B | 上位机 20 Hz |
+| NUC → MC02 | `0xA2` ShootCmd | 12 B | 上位机 100 Hz。校验通过后整体写入 LFCore 的 `shoot_cmd`；云台按 200 ms 时效进入自瞄，发射机构按 `shoot_mode` 发弹 |
+| MC02 → NUC | `0xB0` SyncResponse | 15 B | 回显 A0 的序号 |
+| MC02 → NUC | `0xB1` RawGimbalIMU | 31 B | 250 Hz，新鲜样本 |
+| MC02 → NUC | `0xB2` GimbalStatus | 52 B | 100 Hz，有效姿态与关节反馈 |
+| MC02 → NUC | `0xB3` NavStatus | 24 B | 20 Hz |
+| MC02 → NUC | `0xB4` BigYawHeading | 11 B | 20 Hz，有效 BMI088 样本 |
+| MC02 → NUC | `0xC0` CompStage | 6 B | 1 Hz |
+| MC02 → NUC | `0xC1` CompEvent | 7 B | 1 Hz，来源裁判 0x0101 |
+| MC02 → NUC | `0xC2` AlliedHealth | 19 B | 3 Hz，来源裁判 0x0003 |
+| MC02 → NUC | `0xC3` AlliedPos | 35 B | 1 Hz，来源裁判 0x020B |
+| MC02 → NUC | `0xC4` RobotStatus | 14 B | 10 Hz，来源裁判 0x0201 和 0x0208 |
+| MC02 → NUC | `0xC5` RobotPos | 11 B | 1 Hz，来源裁判 0x0203 |
+| MC02 → NUC | `0xC6` RFIDStatus | 8 B | 3 Hz，来源裁判 0x0209 |
+| MC02 → NUC | `0xC7` HealthReduction | 4 B | 逐包转发裁判 0x0206 |
+| MC02 → NUC | `0xC8` SentryInfo | 17 B | 1 Hz，来源裁判 0x020D |
+| MC02 → NUC | `0xC9` EnemyPos | 43 B | 雷达站，暂缓接入 |
+| MC02 → NUC | `0xCA` OperatorCmd | 13 B | 逐包转发裁判 0x0303 的纯坐标地图点 |
+| MC02 → NUC | `0xCB` EnemyHealth | 13 B | 雷达站，暂缓接入 |
+| MC02 → NUC | `0xCC` EnemyBuff | 18 B | 雷达站，暂缓接入 |
 
-桥接启动先发中性帧建立会话，`mode=0`，`flags=0`，底盘速度和 `fire/fric_on` 为零。
-从 `0x21` 看到对应的 session 和命令时间戳回显后，再发送有效命令。
-同会话使用时间戳有符号差判断前进，支持 uint32 回绕。重复、倒序、错误长度或 CRC 均不刷新命令时效。
+MC02 可分多次读取同一帧，也可一次读取多帧。`B0` 使用 TIM2 和 HAL 时基计算 100 µs 计数。`B1/B2` 保留实际样本的本地毫秒时间，再换算成协议刻度。`B1` 使用现有 DM-IMU 的三轴加速度和角速度。`B2` 上报主控融合出的姿态及已到位的关节形态，非导航的参考字段填 0。
 
-建议每 20 ms 发送最新整帧。导航速度来自 `/nav_executor_omni/cmd_vel` 的完整三轴输出，
-形态模式来自 `/nav_executor_omni/chassis_cmd` 的 `mode`。mode 1/2 使用同帧的 `wz`。
-导航速度源过期时清 bit0 并填零速度。无有效自瞄数据时清 bit2，发射请求置零。
-桥接应分别检查各 ROS 输入的时效，再组合到同一帧。MC02 底盘命令超时为 100 ms。
-ET08A 的 SB 中档选择手动，CH5 控制手动过洞。SB 上档选择自动，AUTO 的速度已经在底盘系。
-遥控直控的平移量按枪口相对底盘的总偏角转换。
+`A1.velocity`、`A1.lateral_velocity` 和 `A1.omega` 分别对应底盘系 `vx/vy/wz`。串口桥从一条 `RoboCmd.msg` 取得三轴速度、模式和可选的过洞航向。有效 A1 刷新 100 ms 指令时效。断开 USB 时立即失能底盘命令。
 
-## MC02 → 上位机
+`A2.yaw/pitch` 是电控世界系下期望的云台欧拉角，`A2.shoot_mode` 的 0/1/2 分别表示不发弹、单发、连发。USB 校验档位范围与浮点有效性后整体写入 `ShootCmdState`，并置 `enabled`；断开 USB 时立即清零。小云台在遥控器上档或断遥控时，用 200 ms 内的有效 A2 进入自瞄（`GIMBAL_AIM_TIMEOUT_MS`），超时回到 GAP/扫描；大 Yaw 随之进入 `kAutoAim`/`kFollow`。发射任务在中档或断遥控时按 `shoot_mode` 拉起摩擦轮并选择单发或连发，超过 200 ms 未刷新按不发弹处理；遥控器下档仍可随时强制停机。
 
-导航侧复用现有帧，并读取补充反馈 `NavigationStatus`。
+B4 上报主板 BMI088 航向及采样时间，NUC 用同时间的 TF 把通行航向换算到主板惯性系，在 A1 模式 0 阶段就开始给大 Yaw 下发目标。NUC 收到新鲜的 `B3=4`，并确认通行航向、底盘与大 Yaw 对齐、实测停车和变形净空后，才发 A1 模式 3。
 
-| ID | 帧 | 上位机使用 |
-| --- | --- | --- |
-| `0x08` | RobotMotion | 22 字节，实测底盘系 vx/vy/wz。使用主控收到该 CAN 反馈的时间戳，有效时发送 |
-| `0x0C` | JointState | 18 字节，小 Pitch/Yaw 机械角，使用关节状态更新时间，有效时发送 |
-| `0x07` | GameStatus | 13 字节，`game_progress` 和阶段剩余时间，映射至 CompStage |
-| `0x0B` | RobotStatus | 读取 `robot_id` 和 `chassis_power_limit`，用于阵营与 NavStatus 功率 |
-| `0x21` | NavigationStatus | 39 字节，20 Hz，过洞状态、命令回显、主控惯性航向、大 Yaw 机械角和缓冲能量 |
+MC02 锁存模式 3 并上报 `B3=3`，收纳到位后上报 `B3=4`。自动过洞大 Yaw 的机械偏角和惯性航向误差各使用 `0.08 rad` 容差，沿用实测停车和关节到位联锁。NUC 收到本次的阻塞到就绪反馈后，保持模式 3 开始通行。整车出洞且停车后，NUC 发模式 4 清除折叠请求。MC02 上报 `B3=5`，Roll 回正、姿态恢复且退出过洞模式后上报 `B3=4`。CDC 忙时，阻塞反馈保留到提交成功。`B2.transformed` 单独表示最近到位的形态。
 
-`NavigationStatus` 头为 `5A 21 21 CRC8`。
+`B3` 的三轴实测速度来自副板 CAN3 反馈。缓冲能量和底盘功率上限使用有效的裁判快照，当前无来源的超电剩余能量和实时底盘功率填 0。裁判链路离线时 `C0` 发阶段 0，其余定频裁判状态帧暂停。链路在线时，USB 读取裁判模块已保存的最近值。`C4` 收齐机器人性能和允许发弹量后上报，`C8` 收到过有效哨兵状态后上报。
 
-| 偏移 | 类型 | 字段 | 含义 |
-| --- | --- | --- | --- |
-| 0 | 4 bytes | frame_header | 通用帧头 |
-| 4 | uint32 | time_stamp | MCU 打包时间，ms |
-| 8 | uint8 | data.transform_state | 执行状态 |
-| 9 | uint8 | data.transformed | 最近完成的形态，0 未知、3 折叠、4 直立 |
-| 10 | uint8 | data.flags | 遥测有效位 |
-| 11/15 | uint32 ×2 | data.session/command_time_stamp | 最近接受的命令回显，未建立会话时为零 |
-| 19 | uint32 | data.main_imu.time_stamp | 主控 BMI088 样本时间，ms |
-| 23 | float | data.main_imu.yaw | 大 Yaw 上的主板惯性航向，rad |
-| 27/31 | uint32/float | data.big_yaw.time_stamp/angle | 大 Yaw 机械角的 CAN 接收时间及角度，ms/rad |
-| 35 | uint16 | data.buffer_energy_j | 裁判缓冲能量，J |
-| 37 | uint16 | crc | CRC16 |
+`C7` 保留裁判扣血事件的原始字节。`CA` 转发有限的原始地图坐标（m），发送的按键和目标机器人 ID 字段均为 0。两帧共用 16 条事件的队列，按接收顺序提交，CDC 忙时重试。队列满时保留已入队的事件，USB 断开时清空。`C9/CB/CC` 当前保留帧号、帧长和入口注释。
 
-`flags` 的 bit0/1 分别表示主板航向和大 Yaw 机械角有效，bit2 表示 RobotStatus
-的裁判功率上限可用，bit3 表示缓冲能量有效，bit4 表示裁判在线。无效航向、机械角和缓冲字段为零。
-裁判在线时使用新鲜的 `0x07` 生成比赛阶段。bit2 有效且 `0x0B` 新鲜时，
-可按 RobotStatus 的 ID 范围确定阵营。1…11 为红，101…111 为蓝。
-超级电容能量当前由桥接填 0，按导航保守策略处理。
+USB 的 `A3` 是 NUC 下行的 `RfrCmd`。USART1 的 `0x0301/0x0120` 由原有裁判任务独立发送，命令值仍沿用原分支。当前 USB 对 `A3/A4/A5` 做长度和 CRC8 校验后跳过。`A4` 的 USB 布局为 64 字节，裁判 `0x0307` 的转换仍待按目标端格式核对。
 
-桥接收到 `0x21` 时从其过洞状态与缓冲能量、最新有效的 `0x0B` 功率组合并发布
-`/serial_bridge/chassis_status`。按收到的状态顺序保留 BLOCKED → READY。
-`0x08` 提供 `/chassis/motion`，可按导航的 20 Hz 节奏发布，每次先处理已收到的状态，
-再发布更新的运动样本，避免状态过期或重复运动样本推进控制。源时间戳须映射到 ROS 时钟；
-桥接对各帧独立检查时效，状态断流时停止使用缓存 READY。
-
-## 过洞握手
-
-| transform_state | 状态 | 导航处理 |
-| --- | --- | --- |
-| 0 | Disabled，非 AUTO 或命令失能/超时 | STOPPED |
-| 1 | Recovering，初始化或反馈未就绪 | STOPPED |
-| 3 | Preparing，停车等待、对齐或折叠中 | BLOCKED |
-| 4 | Ready，请求形态已到位 | NORMAL |
-| 5 | Restoring，停车等待或回正中 | BLOCKED |
-| 6 | Fault，机构故障 | STOPPED |
-
-1. 上位机先发洞口航向。MC02 保持大 Yaw 航向，上位机利用 `map → chassis_link` 和
-   `map → big_yaw_link` 转动底盘对齐。
-2. 使能且带有效航向的 mode 3 锁存折叠请求。主控下发底盘零速，实测平移 ≤ 0.05 m/s、
-   自转 ≤ 0.10 rad/s 才开始机构对齐。
-3. 大 Yaw 航向及机械角到位、低速稳定，并收到进入流程后的新反馈，小 Yaw/Pitch 到位后才放倒 Roll。
-   折叠完成后上报 `transformed=3, transform_state=4`，放行底盘。
-4. 使能的 mode 4 请求回正。先停稳，再从实际位置抬起 Roll，完成后上报
-   `transformed=4, transform_state=4`。mode 0/1/2、失能、断流和新会话握手保持已锁存的形态请求。
-5. 机构故障时需要检查反馈和机械状态，再按手动流程恢复。
-
-MID360 固定在大 Yaw 上。上位机用其定位姿态与安装外参求 `map → big_yaw_link`，
-用大 Yaw 机械角与机构外参求 `big_yaw_link → chassis_link`，组合出底盘定位。
-桥接用对应时刻的主板 BMI088 航向把 `/hole_heading` 从 map 系换成主板惯性系。
-平地且安装轴已校正时，可用 `wrap(洞口 map 航向 − 当前大 Yaw map 航向 + 当前主板 imu_yaw)`。
-`0x02` 是枪口 IMU。主板航向从启动零位积分，上位机需要处理零偏与漂移。
-
-主机回归可运行 `python tests/test_navigation_usb.py` 和 `python tests/test_navigation_passage.py`，
-分别检查固定帧解析、命令锁存、反馈和过洞状态机。实车验证还需要按本协议实现桥接并校验 TF。
-
+离线回归可运行 `python tests/test_navigation_usb.py` 和 `python tests/test_navigation_passage.py`。实车需核对传感器和机械关节轴向、USB 调度及过洞反馈。

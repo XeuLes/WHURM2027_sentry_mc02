@@ -52,6 +52,7 @@ common = r'''
 #include "lf_core.hpp"
 using namespace gimbal;
 using LuojiaFox::GimbalShape;
+using LuojiaFox::GimbalTransformState;
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kDt = GIMBAL_PERIOD_MS * 0.001f;
 float clamp(float x, float lo, float hi) { return fmaxf(lo, fminf(x, hi)); }
@@ -80,18 +81,22 @@ source += body(small, "struct ControlCycle") + ";\n"
 source += body(small, "struct PassageControl") + " passage;\n"
 for signature in ["bool useJointPitch", "void setMode", "void setPassageStage",
                   "void startPassage", "void latchPassageFault", "void failPassage",
-                  "void updatePassageStage", "void selectMode"]:
+                  "LuojiaFox::GimbalTransformState transformState", "void updatePassageStage",
+                  "void selectMode"]:
     source += body(small, signature) + "\n"
 source += r'''
 void navigationPassage() {
     ControlCycle c{};
     c.now = 1000;
     c.normal_mode = Mode::kScan;
-    c.navigation_control = c.passage_requested = true;
+    c.online = c.peer_online = c.navigation_control = true;
+    assert(transformState(c, true) == GimbalTransformState::Ready);
+    c.passage_requested = true;
     c.big_yaw_feedback_revision = 7;
     c.chassis_stopped = true;
     selectMode(c);
     assert(mode == Mode::kScan); // a latched request alone cannot start a new fold
+    assert(transformState(c, true) == GimbalTransformState::Preparing);
     c.navigation_heading_ready = true;
     c.chassis_stopped = false;
     selectMode(c);
@@ -113,6 +118,7 @@ void navigationPassage() {
     c.chassis_stopped = true;
     selectMode(c);
     assert(passage.stage == PassageStage::kFold);
+    assert(transformState(c, true) == GimbalTransformState::Preparing);
     assert(completed_shape == GimbalShape::Upright);
     for (unsigned i = 0; i < 200; ++i) { ++c.now; selectMode(c); }
     assert(passage.stage == PassageStage::kFold); // a command alone is not completion
@@ -120,12 +126,14 @@ void navigationPassage() {
     for (unsigned i = 0; i < GIMBAL_PASS_ROLL_SETTLE_MS; ++i) { ++c.now; selectMode(c); }
     assert(passage.stage == PassageStage::kHold);
     assert(completed_shape == GimbalShape::Folded);
+    assert(transformState(c, true) == GimbalTransformState::Ready);
     for (unsigned i = 0; i < 600; ++i) { ++c.now; selectMode(c); }
     assert(passage.stage == PassageStage::kHold); // retained request, no repeated fold
     c.passage_requested = false;
     c.chassis_stopped = false;
     selectMode(c);
     assert(passage.stage == PassageStage::kHold);
+    assert(transformState(c, true) == GimbalTransformState::Restoring);
     c.chassis_stopped = true;
     selectMode(c);
     assert(passage.stage == PassageStage::kUnfold);
@@ -136,9 +144,11 @@ void navigationPassage() {
     assert(completed_shape == GimbalShape::Upright);
     selectMode(c);
     assert(passage.stage == PassageStage::kWait); // muzzle IMU needed to resume aiming
+    assert(transformState(c, true) == GimbalTransformState::Restoring);
     c.imu_ok = true;
     selectMode(c);
     assert(passage.stage == PassageStage::kIdle && mode == Mode::kScan);
+    assert(transformState(c, true) == GimbalTransformState::Ready);
     // A lost big-yaw confirmation faults a folded mechanism.
     mode = Mode::kPassage;
     passage.stage = PassageStage::kHold;
@@ -230,13 +240,31 @@ int main() {
     c.navigation_heading = c.enable = c.small_yaw_online = true;
     c.yaw_position = 1.2f;
     c.yaw_rate = 0.15f;
+    mode = Mode::kNavigation;
     for (unsigned i = 0; i < 500; ++i) updateReference(c);
     assert(fabsf(target_rad - navigation_heading_rad) < 1e-5f);
     publishTarget(c);
     assert(!board_link::published.joint_frame);
     assert(board_link::published.position_rad == c.yaw_position);
     assert(board_link::published.velocity_rad_s == c.yaw_rate);
-    yaw.joint_rad = 0.2f;
+    updatePassageCentered(c);
+    assert(!passage_yaw_centered); // heading is accepted before a fold is requested
+    mode = Mode::kPassage;
+    yaw.joint_rad = 0.035f;
+    for (unsigned i = 0; i < GIMBAL_PASS_BIG_YAW_SETTLE_MS; ++i) updatePassageCentered(c);
+    assert(passage_yaw_centered);
+
+    passage_centered_ms = 0;
+    yaw.joint_rad = GIMBAL_NAV_PASS_HEADING_TOL_RAD;
+    c.yaw_position = navigation_heading_rad - 0.06f;
+    for (unsigned i = 0; i < GIMBAL_PASS_BIG_YAW_SETTLE_MS; ++i) updatePassageCentered(c);
+    assert(passage_yaw_centered);
+    updatePassageCentered(c);
+    assert(passage_yaw_centered); // stay aligned at the navigation threshold
+    yaw.joint_rad = GIMBAL_NAV_PASS_HEADING_TOL_RAD + 0.001f;
+    updatePassageCentered(c);
+    assert(!passage_yaw_centered);
+    passage_centered_ms = 0;
     for (unsigned i = 0; i < 100; ++i) updatePassageCentered(c);
     assert(!passage_yaw_centered); // correct world heading but chassis not aligned
     yaw.joint_rad = 0;
@@ -261,6 +289,12 @@ int main() {
     assert(!board_link::published.joint_frame && board_link::published.valid);
     assert(fabsf(board_link::published.target_rad - 2.1f) < 1e-5f);
     assert(board_link::published.position_rad == 1.9f);
+
+    passage_centered_ms = 0;
+    c.yaw_position = manual_heading_rad;
+    yaw.joint_rad = 0.035f;
+    for (unsigned i = 0; i < 100; ++i) updatePassageCentered(c);
+    assert(!passage_yaw_centered); // manual threshold is still 0.03 rad
 
     c.manual_passage = false;
     updateManualHeading(c);

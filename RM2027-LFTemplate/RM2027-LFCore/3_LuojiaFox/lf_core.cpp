@@ -85,6 +85,15 @@ void SystemStateStore::updateUsbLink(const UsbLinkState &state)
     taskEXIT_CRITICAL();
 }
 
+void SystemStateStore::updateShootCmd(const ShootCmdState &state)
+{
+    taskENTER_CRITICAL();
+    g_system_state.shoot_cmd = state;
+    // 与 robot_cmd 一致：以本地接受时刻作为消费方的时效判据。
+    g_system_state.shoot_cmd.last_update_ms = HAL_GetTick();
+    taskEXIT_CRITICAL();
+}
+
 void SystemStateStore::updateVirtualRc(const VirtualRcState &state)
 {
     taskENTER_CRITICAL();

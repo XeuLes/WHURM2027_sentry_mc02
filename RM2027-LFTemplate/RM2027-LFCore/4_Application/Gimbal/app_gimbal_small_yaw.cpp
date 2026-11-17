@@ -134,6 +134,34 @@ void send(const ControlCycle& cycle) {
     }
 }
 
+LuojiaFox::GimbalTransformState transformState(const ControlCycle& cycle, bool ready) {
+    using LuojiaFox::GimbalShape;
+    using LuojiaFox::GimbalTransformState;
+    if (mode == Mode::kFault || init_failed || passage.stage == PassageStage::kFault) {
+        return GimbalTransformState::Fault;
+    }
+    if (mode == Mode::kZeroForce || !cycle.online || !cycle.peer_online) {
+        return GimbalTransformState::Disabled;
+    }
+    if (manual_aligning || passage.stage == PassageStage::kAlign || passage.stage == PassageStage::kFold) {
+        return GimbalTransformState::Preparing;
+    }
+    if (passage.stage == PassageStage::kUnfold || passage.stage == PassageStage::kWait) {
+        // Roll 到位后，等待姿态恢复并退出过洞模式。
+        return GimbalTransformState::Restoring;
+    }
+    if (!ready || completed_shape == GimbalShape::Unknown) {
+        return GimbalTransformState::Recovering;
+    }
+    if (cycle.navigation_control && cycle.passage_requested && completed_shape != GimbalShape::Folded) {
+        return GimbalTransformState::Preparing;
+    }
+    if (cycle.navigation_control && !cycle.passage_requested && completed_shape == GimbalShape::Folded) {
+        return GimbalTransformState::Restoring;
+    }
+    return GimbalTransformState::Ready;
+}
+
 void publish(const ControlCycle& cycle) {
     const float yaw_pos = cycle.yaw;
     const float pitch_pos = cycle.pitch;
@@ -166,34 +194,16 @@ void publish(const ControlCycle& cycle) {
     state.mode = static_cast<uint8_t>(mode);
     state.ready = g_debug.ready;
     state.joint_roll_rad = roll.joint;
-    using LuojiaFox::GimbalShape;
-    using LuojiaFox::GimbalTransformState;
     state.transformed = completed_shape;
     state.manual_passage = manual_aligning || (passage.manual && passage.stage != PassageStage::kIdle);
     state.manual_passage_aligning = manual_aligning;
     state.manual_passage_recovering = passage.recovering;
-    if (mode == Mode::kFault || init_failed || passage.stage == PassageStage::kFault) {
-        state.transform_state = GimbalTransformState::Fault;
-    } else if (mode == Mode::kZeroForce || !cycle.online || !cycle.peer_online) {
-        state.transform_state = GimbalTransformState::Disabled;
-    } else if (manual_aligning || passage.stage == PassageStage::kAlign || passage.stage == PassageStage::kFold) {
-        state.transform_state = GimbalTransformState::Preparing;
-    } else if (passage.stage == PassageStage::kUnfold) {
-        state.transform_state = GimbalTransformState::Restoring;
-    } else if (!g_debug.ready || completed_shape == GimbalShape::Unknown) {
-        state.transform_state = GimbalTransformState::Recovering;
-    } else if (cycle.navigation_control && cycle.passage_requested && completed_shape != GimbalShape::Folded) {
-        state.transform_state = GimbalTransformState::Preparing;
-    } else if (cycle.navigation_control && !cycle.passage_requested && completed_shape == GimbalShape::Folded) {
-        state.transform_state = GimbalTransformState::Restoring;
-    } else {
-        state.transform_state = GimbalTransformState::Ready;
-    }
+    state.transform_state = transformState(cycle, g_debug.ready);
     LuojiaFox::system_state.updateGimbal(state);
 }
 
 void selectControlRequest(ControlCycle& cycle, const LuojiaFox::RobotCmdState& cmd,
-                          bool aux_passage) {
+                          const LuojiaFox::ShootCmdState& shoot_cmd, bool aux_passage) {
     const bool robot_cmd_seen = cmd.last_update_ms != 0U;
     if (cycle.rc_online) {
         switch (cycle.sw) {
@@ -206,7 +216,7 @@ void selectControlRequest(ControlCycle& cycle, const LuojiaFox::RobotCmdState& c
         default:
             return;
         }
-    } else if (!robot_cmd_seen) {
+    } else if (!robot_cmd_seen && !shoot_cmd.enabled) {
         return;
     }
 
@@ -214,10 +224,10 @@ void selectControlRequest(ControlCycle& cycle, const LuojiaFox::RobotCmdState& c
     cycle.navigation_heading_ready = robot_cmd_seen && cmd.chassis_enabled && cmd.heading_valid &&
         cycle.now - cmd.last_update_ms < chassis_app::kAutoCommandTimeoutMs;
     cycle.passage_requested = cmd.passage_requested;
-    cycle.aim_yaw = cmd.gimbal_yaw;
-    cycle.aim_pitch = cmd.gimbal_pitch;
-    const bool fresh_aim = robot_cmd_seen && cmd.aim_valid &&
-        cycle.now - cmd.last_update_ms < GIMBAL_AIM_TIMEOUT_MS &&
+    cycle.aim_yaw = shoot_cmd.yaw;
+    cycle.aim_pitch = shoot_cmd.pitch;
+    const bool fresh_aim = shoot_cmd.enabled && shoot_cmd.last_update_ms != 0U &&
+        cycle.now - shoot_cmd.last_update_ms < GIMBAL_AIM_TIMEOUT_MS &&
         isfinite(cycle.aim_yaw) && isfinite(cycle.aim_pitch);
     const Mode scan_mode = mode == Mode::kGap || mode == Mode::kScan ? Mode::kScan : Mode::kGap;
     cycle.normal_mode = fresh_aim ? Mode::kAutoAim : scan_mode;
@@ -264,7 +274,7 @@ void observe(ControlCycle& cycle) {
         aux_passage = rc->rc.s[GIMBAL_PASS_SWITCH_INDEX] == GIMBAL_PASS_SWITCH_POSITION;
         taskEXIT_CRITICAL();
     }
-    selectControlRequest(cycle, state.robot_cmd, aux_passage);
+    selectControlRequest(cycle, state.robot_cmd, state.shoot_cmd, aux_passage);
     cycle.chassis_stopped = state.chassis.valid &&
         cycle.now - state.chassis.last_update_ms < board_link::can3::kChassisFeedbackTimeoutMs &&
         hypotf(state.chassis.vx, state.chassis.vy) <= chassis_app::kPassageStoppedSpeed &&
@@ -510,6 +520,7 @@ void updateReference(ControlCycle& cycle) {
         scan_phase = wrap(scan_phase);
         pitch.target = GIMBAL_SCAN_PITCH_AMPLITUDE_RAD * sinf(scan_phase);
     } else if (mode == Mode::kAutoAim) {
+        // A2 直接给出电控世界系下的期望云台欧拉角。
         yaw.target = cycle.aim_yaw;
         pitch.target = cycle.aim_pitch;
     }

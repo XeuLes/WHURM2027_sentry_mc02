@@ -65,3 +65,17 @@ void delayMs(uint32_t ms) {
 
     while ((HAL_GetTick() - now) < ms) {}
 }
+
+uint32_t getTick100us(void) {
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    uint32_t ms = HAL_GetTick();
+    uint32_t us = TIM2->CNT;
+    if ((TIM2->SR & TIM_SR_UIF) != 0U) {
+        // TIM2 已回绕，HAL 的毫秒更新还在等待中断。
+        ++ms;
+        us = TIM2->CNT;
+    }
+    __set_PRIMASK(mask);
+    return ms * 10U + us / 100U;
+}

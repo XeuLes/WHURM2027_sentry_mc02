@@ -35,6 +35,17 @@ struct RefereePowerSnapshot {
     uint16_t shooter_17mm_heat;
 };
 
+struct RefereeUsbEvent {
+    enum class Type : uint8_t {
+        HealthReduction,
+        OperatorWaypoint,
+    };
+
+    Type type;
+    uint8_t armor_and_reason;
+    float waypoint_x, waypoint_y;
+};
+
 #define USART_RX_BUF_LENGHT 512
 #define REFEREE_FIFO_BUF_LENGTH 1024
 
@@ -357,6 +368,11 @@ public:
     bool IsAttacked(void);
     float GetBuffer(void);
     RefereePowerSnapshot GetPowerSupplySnapshot();
+    bool ReadRobotStatus(robot_status_t& status, projectile_allowance_t& allowance);
+    bool ReadSentryInfo(sentry_info_t& status);
+    void SetUsbEventForwarding(bool enabled);
+    bool PeekUsbEvent(RefereeUsbEvent& event);
+    void PopUsbEvent();
     void GetChassisPowerLimit(uint16_t *power_limit);
     void GetShootHeat17LimitAndHeat17(uint16_t *cooling_value, uint16_t *heat_limit, uint16_t *heat);
     void GetSentryInfo(uint32_t *sentry_info, uint16_t *sentry_info_2, uint64_t *sentry_info_3);
@@ -370,6 +386,8 @@ public:
     float GetCustomControllerPos(uint8_t index);
 
 private:
+    void EnqueueUsbEvent(const RefereeUsbEvent& event);
+
     frame_header_struct_t receive_header;
     frame_header_struct_t send_header;
 
@@ -379,6 +397,14 @@ private:
     uint32_t buffer_tick_ = 0;
     bool power_received_ = false;
     bool buffer_received_ = false;
+    bool projectile_allowance_received_ = false;
+    bool sentry_info_received_ = false;
+
+    static constexpr uint8_t kUsbEventQueueSize = 16;
+    RefereeUsbEvent usb_events_[kUsbEventQueueSize]{};
+    uint8_t usb_event_head_ = 0;
+    uint8_t usb_event_count_ = 0;
+    bool usb_event_forwarding_ = false;
 
     uint16_t last_hp_ = 0;
     uint32_t attacked_time_ = 0;

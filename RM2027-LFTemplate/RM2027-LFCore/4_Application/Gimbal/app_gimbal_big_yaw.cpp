@@ -117,19 +117,25 @@ void publishDebug(const ControlCycle& cycle) {
 void updatePassageCentered(const ControlCycle& cycle) {
     bool centered = false;
     if (!cycle.stop && !init_failed && mode == Mode::kPassage) {
+        const bool navigation = cycle.navigation_heading;
+        const auto yaw_aligned = [navigation](float error_rad) {
+            return navigation ? fabsf(error_rad) <= GIMBAL_NAV_PASS_HEADING_TOL_RAD
+                              : fabsf(error_rad) < GIMBAL_PASS_POSITION_TOL_RAD;
+        };
+        const bool joint_aligned = yaw_aligned(yaw.joint_rad);
         if (passage_centered_ms < GIMBAL_PASS_BIG_YAW_SETTLE_MS) {
             const bool reference_settled = useJointFrame(mode, cycle) ?
                 (fabsf(passage_path.position) < GIMBAL_PASS_POSITION_TOL_RAD &&
                  fabsf(passage_path.velocity) < GIMBAL_PASS_SPEED_TOL_RAD_S) :
                 (hasPassageHeading(cycle) &&
-                 fabsf(wrap(passageHeading(cycle) - cycle.yaw_position)) < GIMBAL_PASS_POSITION_TOL_RAD);
-            const bool settled = fabsf(yaw.joint_rad) < GIMBAL_PASS_POSITION_TOL_RAD &&
-                yaw.slow && reference_settled;
+                 yaw_aligned(wrap(passageHeading(cycle) - cycle.yaw_position)));
+            const bool settled = joint_aligned && yaw.slow && reference_settled;
             passage_centered_ms = settled ? passage_centered_ms + GIMBAL_PERIOD_MS : 0;
         }
-        // Allow small holding corrections, but withdraw the acknowledgement on a large drift.
-        centered = passage_centered_ms >= GIMBAL_PASS_BIG_YAW_SETTLE_MS &&
-            fabsf(yaw.joint_rad) < 2.0f * GIMBAL_PASS_POSITION_TOL_RAD;
+        // 自动过洞在 NUC 的机械偏角容差内保持已对齐确认。
+        const bool hold_aligned = navigation ? joint_aligned
+            : fabsf(yaw.joint_rad) < 2.0f * GIMBAL_PASS_POSITION_TOL_RAD;
+        centered = passage_centered_ms >= GIMBAL_PASS_BIG_YAW_SETTLE_MS && hold_aligned;
     }
     taskENTER_CRITICAL();
     passage_yaw_centered = centered;

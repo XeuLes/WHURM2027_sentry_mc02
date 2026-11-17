@@ -21,6 +21,8 @@
 #include "stm32h7xx_hal.h"
 #include "string.h"
 
+#include <cmath>
+
 Referee referee;
 
 void Referee::Init(void)
@@ -58,6 +60,8 @@ void Referee::Init(void)
     receive_count = 0;
     power_tick_ = buffer_tick_ = 0;
     power_received_ = buffer_received_ = false;
+    projectile_allowance_received_ = sentry_info_received_ = false;
+    SetUsbEventForwarding(false);
     last_hp_ = 0;
     attacked_time_ = 0;
 }
@@ -66,6 +70,7 @@ void Referee::DataSolve(uint8_t *frame)
 {
     if (HAL_GetTick() - online_time > kTimeout) {
         receive_count = 0;
+        projectile_allowance_received_ = sentry_info_received_ = false;
     }
     receive_count++;
 
@@ -149,28 +154,56 @@ void Referee::DataSolve(uint8_t *frame)
             online_time = HAL_GetTick();
         } break;
         case ROBOT_HURT_CMD_ID: {
+            if (receive_header.data_length != sizeof(hurt_data_t)) {
+                --receive_count;
+                break;
+            }
             memcpy(&robot_hurt_t, frame + index, sizeof(hurt_data_t));
             online_time = HAL_GetTick();
+            EnqueueUsbEvent({RefereeUsbEvent::Type::HealthReduction, frame[index], 0.0f, 0.0f});
         } break;
         case SHOOT_DATA_CMD_ID: {
             memcpy(&shoot_data, frame + index, sizeof(shoot_data_t));
             online_time = HAL_GetTick();
         } break;
         case PROJECTILE_ALLOWANCE_CMD_ID: {
+            if (receive_header.data_length != sizeof(projectile_allowance_t)) {
+                --receive_count;
+                break;
+            }
+            const uint32_t mask = __get_PRIMASK();
+            __disable_irq();
             memcpy(&projectile_allowance, frame + index, sizeof(projectile_allowance_t));
             online_time = HAL_GetTick();
+            projectile_allowance_received_ = true;
+            __set_PRIMASK(mask);
         } break;
         case STUDENT_INTERACTIVE_DATA_CMD_ID: {
             memcpy(&student_interactive_data_t, frame + index, sizeof(robot_interaction_data_t));
             online_time = HAL_GetTick();
+            // 雷达站数据解析入口暂缓。C9 / CB / CC 的 USB 上报保持停用。
         } break;
         case CUSTOM_CONTROLLER_CMD_ID: {
             memcpy(&CUSTOM_CONTROLLER_DATA, frame + index, sizeof(CustomControllerData_t));
             online_time = HAL_GetTick();
         } break;
         case MAP_COMMAND_CMD_ID: {
-            memcpy(&MAP_COMMAND_DATA, frame + index, sizeof(MapCommandData_t));
+            // V2.0.0 总表列为 15 字节，字段表列出前 12 字节。
+            constexpr uint16_t kListedMapCommandSize = 15U;
+            if (receive_header.data_length != sizeof(MapCommandData_t) &&
+                receive_header.data_length != kListedMapCommandSize) {
+                --receive_count;
+                break;
+            }
+            MapCommandData_t command;
+            memcpy(&command, frame + index, sizeof(command));
+            MAP_COMMAND_DATA = command;
             online_time = HAL_GetTick();
+            if (command.cmd_keyboard == 0U && command.target_robot_id == 0U &&
+                std::isfinite(command.target_position_x) && std::isfinite(command.target_position_y)) {
+                EnqueueUsbEvent({RefereeUsbEvent::Type::OperatorWaypoint, 0U,
+                                 command.target_position_x, command.target_position_y});
+            }
         } break;
         case RFID_STATUS_ID: {
             memcpy(&RFID_STATUS, frame + index, sizeof(rfid_status_t));
@@ -183,8 +216,16 @@ void Referee::DataSolve(uint8_t *frame)
             online_time = HAL_GetTick();
         } break;
         case SENTRY_DECISION_INFO_ID: {
+            if (receive_header.data_length != sizeof(sentry_info_t)) {
+                --receive_count;
+                break;
+            }
+            const uint32_t mask = __get_PRIMASK();
+            __disable_irq();
             memcpy(&sentry_decision_info_t, frame + index, sizeof(sentry_info_t));
             online_time = HAL_GetTick();
+            sentry_info_received_ = true;
+            __set_PRIMASK(mask);
         } break;
         default: {
             receive_count--;
@@ -291,6 +332,80 @@ RefereePowerSnapshot Referee::GetPowerSupplySnapshot()
     __DMB();
     __set_PRIMASK(mask);
     return result;
+}
+
+bool Referee::ReadRobotStatus(robot_status_t& status, projectile_allowance_t& allowance)
+{
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    const bool ready = !IsOffline() && power_received_ && projectile_allowance_received_ &&
+        HAL_GetTick() - power_tick_ < kTimeout && robot_status.robot_id != 0U;
+    if (ready) {
+        status = robot_status;
+        allowance = projectile_allowance;
+    }
+    __set_PRIMASK(mask);
+    return ready;
+}
+
+bool Referee::ReadSentryInfo(sentry_info_t& status)
+{
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    const bool ready = !IsOffline() && sentry_info_received_;
+    if (ready) {
+        status = sentry_decision_info_t;
+    }
+    __set_PRIMASK(mask);
+    return ready;
+}
+
+void Referee::SetUsbEventForwarding(bool enabled)
+{
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    usb_event_forwarding_ = enabled;
+    if (!enabled) {
+        usb_event_head_ = 0U;
+        usb_event_count_ = 0U;
+    }
+    __set_PRIMASK(mask);
+}
+
+void Referee::EnqueueUsbEvent(const RefereeUsbEvent& event)
+{
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    // 队列满时保留先前待发的事件，USB 忙时可原序重试。
+    if (usb_event_forwarding_ && usb_event_count_ < kUsbEventQueueSize) {
+        const uint8_t tail = (usb_event_head_ + usb_event_count_) % kUsbEventQueueSize;
+        usb_events_[tail] = event;
+        ++usb_event_count_;
+    }
+    __set_PRIMASK(mask);
+}
+
+bool Referee::PeekUsbEvent(RefereeUsbEvent& event)
+{
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    const bool pending = usb_event_count_ != 0U;
+    if (pending) {
+        event = usb_events_[usb_event_head_];
+    }
+    __set_PRIMASK(mask);
+    return pending;
+}
+
+void Referee::PopUsbEvent()
+{
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    if (usb_event_count_ != 0U) {
+        usb_event_head_ = (usb_event_head_ + 1U) % kUsbEventQueueSize;
+        --usb_event_count_;
+    }
+    __set_PRIMASK(mask);
 }
 
 void Referee::GetChassisPowerLimit(uint16_t *power_limit) { *power_limit = robot_status.chassis_power_limit; }

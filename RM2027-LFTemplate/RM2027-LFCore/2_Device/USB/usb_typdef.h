@@ -1,543 +1,275 @@
 #ifndef USB_TYPEDEF_H
 #define USB_TYPEDEF_H
 
+#include <stdint.h>
+
 #include "attribute_typedef.h"
-#include "remote_control.h"
-#include "struct_typedef.h"
 
-#define DEBUG_PACKAGE_NUM 10
+// LFSentryCommon27 Gimbal/NUC USB CDC. All multibyte fields are little-endian.
+enum {
+    USB_SYNC_REQUEST_SOF = 0xA0,
+    USB_ROBO_CMD_SOF = 0xA1,
+    USB_SHOOT_CMD_SOF = 0xA2,
+    USB_RFR_CMD_SOF = 0xA3,
+    USB_GLOBAL_PATH_SOF = 0xA4,
+    USB_DECISION_GIMBAL_CMD_SOF = 0xA5,
+    USB_SYNC_RESPONSE_SOF = 0xB0,
+    USB_RAW_GIMBAL_IMU_SOF = 0xB1,
+    USB_GIMBAL_STATUS_SOF = 0xB2,
+    USB_NAV_STATUS_SOF = 0xB3,
+    USB_BIG_YAW_HEADING_SOF = 0xB4,
+    USB_COMP_STAGE_SOF = 0xC0,
+    USB_COMP_EVENT_SOF = 0xC1,
+    USB_ALLIED_HEALTH_SOF = 0xC2,
+    USB_ALLIED_POS_SOF = 0xC3,
+    USB_ROBOT_STATUS_SOF = 0xC4,
+    USB_ROBOT_POS_SOF = 0xC5,
+    USB_RFID_STATUS_SOF = 0xC6,
+    USB_HEALTH_REDUCTION_SOF = 0xC7,
+    USB_SENTRY_INFO_SOF = 0xC8,
+    USB_ENEMY_POS_SOF = 0xC9,
+    USB_OPERATOR_CMD_SOF = 0xCA,
+    USB_ENEMY_HEALTH_SOF = 0xCB,
+    USB_ENEMY_BUFF_SOF = 0xCC,
+};
 
-#define DATA_DOMAIN_OFFSET 0x08
+enum {
+    USB_ROBO_MODE_NORMAL = 0,
+    USB_ROBO_MODE_SPIN_SLOW = 1,
+    USB_ROBO_MODE_SPIN_FAST = 2,
+    USB_ROBO_MODE_FOLD = 3,
+    USB_ROBO_MODE_RESTORE = 4,
+};
 
-// clang-format off
-#define SEND_SOF    ((uint8_t)0x5A)
-#define RECEIVE_SOF ((uint8_t)0x5A)
+enum {
+    USB_SHOOT_MODE_NONE = 0,
+    USB_SHOOT_MODE_SINGLE = 1,
+    USB_SHOOT_MODE_BURST = 2,
+};
 
-#define DEBUG_DATA_SEND_ID        ((uint8_t)0x01)
-#define IMU_DATA_SEND_ID          ((uint8_t)0x02)
-#define ROBOT_STATE_INFO_DATA_SEND_ID   ((uint8_t)0x03)
-#define EVENT_DATA_SEND_ID        ((uint8_t)0x04)
-#define PID_DEBUG_DATA_SEND_ID    ((uint8_t)0x05)
-#define ALL_ROBOT_HP_SEND_ID      ((uint8_t)0x06)
-#define GAME_STATUS_SEND_ID       ((uint8_t)0x07) 
-#define ROBOT_MOTION_DATA_SEND_ID ((uint8_t)0x08)
-#define GROUND_ROBOT_POSITION_SEND_ID ((uint8_t)0x09)
-#define RFID_STATUS_SEND_ID       ((uint8_t)0x0A)
-#define ROBOT_STATUS_SEND_ID      ((uint8_t)0x0B)
-#define JOINT_STATE_SEND_ID       ((uint8_t)0x0C)
-#define BUFF_SEND_ID              ((uint8_t)0x0D)
-#define SENTRYINFO_SEND_ID        ((uint8_t)0x0E)
-#define MAP_COMMAND_SEND_ID       ((uint8_t)0x0F)
-#define INIT_SPEED_SEND_ID        ((uint8_t)0x10)
-#define NAVIGATION_STATUS_SEND_ID ((uint8_t)0x21)
-
-#define ROBOT_CMD_DATA_RECEIVE_ID  ((uint8_t)0x01)
-#define PID_DEBUG_DATA_RECEIVE_ID  ((uint8_t)0x02)
-#define VIRTUAL_RC_DATA_RECEIVE_ID ((uint8_t)0x03)
-#define SENTRY_CMD_RECEIVE_ID      ((uint8_t)0x04)
-// clang-format on
-
-//后续迁移到其他文件中整体定义
-#ifndef CHASSIS_OMNI_WHEEL
-#define CHASSIS_NONE           0  // 无底盘
-#define CHASSIS_MECANUM_WHEEL  1  // 麦克纳姆轮底盘
-#define CHASSIS_OMNI_WHEEL     2  // 全向轮底盘
-#define CHASSIS_STEERING_WHEEL 3  // 舵轮底盘
-#define CHASSIS_BALANCE        4  // 平衡底盘
-
-#define GIMBAL_NONE                 0  // 无云台
-#define GIMBAL_YAW_PITCH_DIRECT     1  // yaw-pitch 电机直连云台
-#define GIMBAL_BIG_YAW              2  // 大 yaw 环云台
-
-#define SHOOT_NONE              0  // 无发射机构
-#define SHOOT_FRIC_TRIGGER      1  // 摩擦轮 + 拨弹盘
-#define SHOOT_PNEUMATIC_TRIGGER 2  // 气动 + 拨弹盘
-
-#define MECHANICAL_ARM_NONE             0  // 无机械臂
-#define MECHANICAL_ARM_PENGUIN_MINI_ARM 1  // 企鹅 mini 机械臂
-#define MECHANICAL_ARM_ENGINEER_ARM     2  // 工程机械臂
-#endif
-
-/* 本车实际构型，改这里即可 */
-#ifndef CHASSIS_TYPE
-#define CHASSIS_TYPE CHASSIS_OMNI_WHEEL
-#endif
-#ifndef GIMBAL_TYPE
-#define GIMBAL_TYPE GIMBAL_YAW_PITCH_DIRECT
-#endif
-#ifndef SHOOT_TYPE
-#define SHOOT_TYPE SHOOT_FRIC_TRIGGER
-#endif
-#ifndef MECHANICAL_ARM_TYPE
-#define MECHANICAL_ARM_TYPE MECHANICAL_ARM_NONE
-#endif
-
-typedef struct
-{
-    uint8_t sof;  // 数据帧起始字节，固定值为 0x5A
-    uint8_t len;  // 数据段长度
-    uint8_t id;   // 数据段id
-    uint8_t crc;  // 数据帧头的 CRC8 校验
+typedef struct {
+    uint8_t sof;  // 帧类型
+    uint8_t len;  // 包含帧头和 CRC8 的总长
 } __packed__ FrameHeader_t;
-/*-------------------- Send --------------------*/
 
-// 串口调试数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x01
-    uint32_t time_stamp;
-    struct
-    {
-        uint8_t name[10];
-        uint8_t type;
-        float data;
-    } __packed__ packages[DEBUG_PACKAGE_NUM];
-    uint16_t checksum;
-} __packed__ SendDataDebug_s;
-
-// IMU 数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x02
-    uint32_t time_stamp;
-    struct
-    {
-        float yaw;    // 度
-        float pitch;  // 度
-        float roll;   // 度
-
-        float yaw_vel;    // 度/秒
-        float pitch_vel;  // 度/秒
-        float roll_vel;   // 度/秒
-
-        // float x_accel;  // m/s^2
-        // float y_accel;  // m/s^2
-        // float z_accel;  // m/s^2
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataImu_s;
-
-// 机器人信息数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x03
-    uint32_t time_stamp;
-    struct
-    {
-        /// @brief 机器人部位类型 2 bytes
-        struct
-        {
-            uint16_t chassis : 3;
-            uint16_t gimbal : 3;
-            uint16_t shoot : 3;
-            uint16_t arm : 3;
-            uint16_t custom_controller : 3;
-            uint16_t reserve : 1;
-        } __packed__ type;
-        /// @brief 机器人部位状态 1 byte
-        /// @note 0: 正常，1: 错误
-        struct
-        {
-            uint8_t chassis : 1;
-            uint8_t gimbal : 1;
-            uint8_t shoot : 1;
-            uint8_t arm : 1;
-            uint8_t custom_controller : 1;
-            uint8_t reserve : 3;
-        } __packed__ state;
-        /// @brief 机器人裁判系统信息 7 bytes
-        struct
-        {
-            uint8_t id;
-            uint8_t color;  // 0-red 1-blue 2-unknown
-            bool attacked;
-            uint16_t hp;
-            uint16_t heat;
-        } __packed__ referee;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataRobotStateInfo_s;
-
-// 事件数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x04
-    uint32_t time_stamp;
-
-    struct
-    {
-        /* 场地事件原始值，位定义与裁判系统 0x0101 一致，
-           见《RoboMaster 2026 通信协议 V2.0.0》表 1-9。
-           上位机自行按位拆解，避免板子侧再做一次位域映射导致语义漂移。 */
-        uint32_t event_data;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataEvent_s;
-
-// PID调参数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x05
-    uint32_t time_stamp;
-    struct
-    {
-        float fdb;
-        float ref;
-        float pid_out;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataPidDebug_s;
-
-// 全场机器人hp信息数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x06
-    uint32_t time_stamp;
-    struct
-    {
-        uint16_t ally_1_robot_HP;
-        uint16_t ally_2_robot_HP;
-        uint16_t ally_3_robot_HP;
-        uint16_t ally_4_robot_HP;
-        int16_t damage_difference;  // 己方全队总伤害与对方全队总伤害之差
-        uint16_t ally_7_robot_HP;
-        uint16_t ally_outpost_HP;
-        uint16_t ally_base_HP;
-        uint16_t enemy_outpost_HP;  // 对方前哨站血量
-        uint16_t enemy_base_HP;     // 对方基地血量
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataAllRobotHp_s;
-
-// 比赛信息数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x07
-    uint32_t time_stamp;
-    struct
-    {
-        uint8_t game_progress;
-        uint16_t stage_remain_time;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataGameStatus_s;
-
-// 地面机器人位置数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x09
-    uint32_t time_stamp;
-    
-    struct
-    {
-        float hero_x;
-        float hero_y;
-
-        float engineer_x;
-        float engineer_y;
-
-        float standard_3_x;
-        float standard_3_y;
-
-        float standard_4_x;
-        float standard_4_y;
-
-        float reserved1;  // 裁判系统 0x020B 的保留位
-        float reserved2;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataGroundRobotPosition_s;
-
-// 机器人运动数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x08
-    uint32_t time_stamp;
-    struct
-    {
-        struct
-        {
-            float vx;
-            float vy;
-            float wz;
-        } __packed__ speed_vector;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataRobotMotion_s;
-
-// RFID状态数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x0A
-    uint32_t time_stamp;
-
-    //   struct
-    // {
-    //     bool base_gain_point;                     // 己方基地增益点
-    //     bool circular_highland_gain_point;        // 己方环形高地增益点
-    //     bool enemy_circular_highland_gain_point;  // 对方环形高地增益点
-    //     bool friendly_r3_b3_gain_point;           // 己方 R3/B3 梯形高地增益点
-    //     bool enemy_r3_b3_gain_point;              // 对方 R3/B3 梯形高地增益点
-    //     bool friendly_r4_b4_gain_point;           // 己方 R4/B4 梯形高地增益点
-    //     bool enemy_r4_b4_gain_point;              // 对方 R4/B4 梯形高地增益点
-    //     bool energy_mechanism_gain_point;         // 己方能量机关激活点
-    //     bool friendly_fly_ramp_front_gain_point;  // 己方飞坡增益点（靠近己方一侧飞坡前）
-    //     bool friendly_fly_ramp_back_gain_point;  // 己方飞坡增益点（靠近己方一侧飞坡后）
-    //     bool enemy_fly_ramp_front_gain_point;  // 对方飞坡增益点（靠近对方一侧飞坡前）
-    //     bool enemy_fly_ramp_back_gain_point;   // 对方飞坡增益点（靠近对方一侧飞坡后）
-    //     bool friendly_outpost_gain_point;      // 己方前哨站增益点
-    //     bool friendly_healing_point;           // 己方补血点（检测到任一均视为激活）
-    //     bool friendly_sentry_patrol_area;      // 己方哨兵巡逻区
-    //     bool enemy_sentry_patrol_area;         // 对方哨兵巡逻区
-    //     bool friendly_big_resource_island;     // 己方大资源岛增益点
-    //     bool enemy_big_resource_island;        // 对方大资源岛增益点
-    //     bool friendly_exchange_area;           // 己方兑换区
-    //     bool center_gain_point;  // 中心增益点 RFID 卡状态（仅 RMUL 适用），1 为已检测到
-    // } __attribute__((packed)) data;
-    struct
-    {
-        uint32_t rfid_status;
-        uint8_t rfid_status_2;
-    } __attribute__((packed)) data;
-    uint16_t crc;            
-} __packed__ SendDataRfidStatus_s;
-
-// 机器人状态数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x0B
-    uint32_t time_stamp;
-
-    struct
-    {
-        uint8_t robot_id;
-        uint8_t robot_level;
-        uint16_t current_hp;
-        uint16_t maximum_hp;
-        uint16_t shooter_barrel_cooling_value;
-        uint16_t shooter_barrel_heat_limit;
-        uint16_t chassis_power_limit;
-        float bullet_speed_limit;  // 射击初速度上限
-
-        uint16_t shooter_17mm_barrel_heat;
-        uint16_t shooter_42mm_barrel_heat;
-
-        float robot_pos_x;
-        float robot_pos_y;
-        float robot_pos_angle;
-
-        uint8_t armor_id : 4;
-        uint8_t hp_deduction_reason : 4;
-
-        uint16_t projectile_allowance_17mm;
-        uint16_t projectile_allowance_42mm;
-        uint16_t remaining_gold_coin;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataRobotStatus_s;
-
-// 云台状态数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x0C
-    uint32_t time_stamp;
-    struct
-    {
-        float pitch;
-        float yaw;
-
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataJointState_s;
-
-// 机器人增益和底盘能量数据包
-typedef struct 
-{
+// NUC -> Gimbal
+typedef struct {
     FrameHeader_t frame_header;
-    uint32_t time_stamp;
+    uint32_t sequence;
+    uint8_t checksum;
+} __packed__ ReceiveSyncRequest_s;
 
-    struct
-    {
-        uint8_t recovery_buff;   // 回血增益，百分比
-        uint16_t cooling_buff;   // 射击热量冷却增益具体值
-        uint8_t defence_buff;    // 防御增益，百分比
-        uint8_t vulnerability_buff;  // 负防御增益，百分比
-        uint16_t attack_buff;    // 攻击增益，百分比
-        uint8_t remaining_energy;    // 剩余能量值反馈，各位含义见协议表 1-15
-    } __packed__ data;
+// 底盘运动与过洞请求。
+typedef struct {
+    FrameHeader_t frame_header;
+    float velocity;  // 底盘前向速度，m/s
+    float omega;     // 底盘绕 z 轴角速度，rad/s
+    uint8_t mode;
+    uint8_t hole_dist;  // cm，仅 mode 3/4 有效
+    float lateral_velocity;  // 底盘横向速度，左为正，m/s
+    uint8_t heading_valid;
+    float big_yaw_heading;  // 主板 BMI088 惯性系，rad
+    uint8_t checksum;
+} __packed__ ReceiveRoboCmd_s;
 
-    uint16_t crc;
-} __packed__ SendDataBuff_s;
+// 自瞄目标与发弹请求，角度为电控世界系下的期望云台欧拉角。
+typedef struct {
+    FrameHeader_t frame_header;
+    float yaw;    // -pi~pi，rad
+    float pitch;  // -pi/2~pi/2，rad
+    uint8_t shoot_mode;  // 0 不发弹，1 单发，2 连发
+    uint8_t checksum;
+} __packed__ ReceiveShootCmd_s;
 
-// 哨兵信息数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x0E
-    uint32_t time_stamp;
+typedef struct {
+    FrameHeader_t frame_header;
+    uint8_t stance;
+    uint8_t checksum;
+} __packed__ ReceiveRfrCmd_s;
 
-    struct
-    {
-        uint32_t sentry_info;    // bit 0-31，兑换次数 / 复活 / 立即复活金币数
-        uint16_t sentry_info_2;  // bit 0-15，脱战状态 / 可兑换数 / 当前姿态 / 能量机关 / 强化姿态
-        uint64_t sentry_info_3;  // bit 0-63，六种姿态弱化前剩余可持续时长，每 8 bit 一个
-    } __packed__ data;
+typedef struct {
+    FrameHeader_t frame_header;
+    uint8_t reserved;
+    int16_t start_x, start_y;   // dm
+    int8_t delta_x[28], delta_y[28];
+    uint8_t checksum;
+} __packed__ ReceiveGlobalPath_s;
 
-    uint16_t crc;
-} __packed__ SendDataSentryInfo_s;
+// 决策云台目标。当前只校验长度和 CRC8，不参与控制。
+typedef struct {
+    FrameHeader_t frame_header;
+    float yaw;    // 电控世界系，rad
+    float pitch;  // 电控世界系，rad
+    uint8_t checksum;
+} __packed__ ReceiveDecisionGimbalCmd_s;
 
-typedef struct 
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x0F
-    uint32_t time_stamp;
-    struct
-    {
-        float target_position_x;
-        float target_position_y;
-        uint8_t cmd_keyboard;
-        uint8_t target_robot_id;
-        uint16_t cmd_source;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataMapCmd_s;
+// Gimbal -> NUC
+typedef struct {
+    FrameHeader_t frame_header;
+    uint32_t sequence;
+    uint32_t t2_ticks;  // 通过 CRC 校验的本地时刻，100 us
+    uint32_t t3_ticks;  // 提交 CDC 发送的本地时刻，100 us
+    uint8_t checksum;
+} __packed__ SendSyncResponse_s;
 
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x10
-    uint32_t time_stamp;
-    struct
-    {
-        float initial_speed;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendInitSpeed_s;
+typedef struct {
+    FrameHeader_t frame_header;
+    uint32_t sample_ticks;
+    float accel_x, accel_y, accel_z;  // IMU 机体系，m/s²
+    float gyro_x, gyro_y, gyro_z;     // IMU 机体系，rad/s
+    uint8_t checksum;
+} __packed__ SendRawGimbalImu_s;
 
-enum {
-    NAV_STATUS_IMU_VALID      = 1U << 0,
-    NAV_STATUS_BIG_YAW_VALID  = 1U << 1,
-    NAV_STATUS_POWER_VALID    = 1U << 2,
-    NAV_STATUS_BUFFER_VALID   = 1U << 3,
-    NAV_STATUS_REFEREE_ONLINE = 1U << 4,
-};
+typedef struct {
+    FrameHeader_t frame_header;
+    uint32_t sample_ticks;
+    float x, y, z, w;  // 四元数，电控世界系
+    float pitch;
+    float yaw;
+    float pitch_ref;
+    float yaw_ref;
+    float bullet_speed;
+    float big_yaw;
+    float roll;
+    uint8_t transformed;  // 已完成的形态
+    uint8_t checksum;
+} __packed__ SendGimbalStatus_s;
 
-// 导航补充反馈。底盘速度、小 Yaw/Pitch 关节及其他裁判数据使用现有发送帧。
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x21
-    uint32_t time_stamp;
-    struct
-    {
-        uint8_t transform_state;
-        uint8_t transformed;
-        uint8_t flags;
-        uint32_t session;
-        uint32_t command_time_stamp;
-        struct
-        {
-            uint32_t time_stamp;
-            float yaw;
-        } __packed__ main_imu;   // 大 Yaw 上的主控 BMI088 惯性航向，rad
-        struct
-        {
-            uint32_t time_stamp;
-            float angle;
-        } __packed__ big_yaw;    // 大 Yaw 相对底盘的机械角，rad
-        uint16_t buffer_energy_j;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ SendDataNavigationStatus_s;
+typedef struct {
+    FrameHeader_t frame_header;
+    float vx, vy, omega;  // 底盘实测速度，m/s、m/s、rad/s
+    uint8_t transform_state;  // 执行状态
+    int16_t remaining_energy_supercap;
+    int16_t remaining_energy_buffercap;
+    int16_t curr_chassis_pwr;
+    int16_t rfr_pwr_limit;
+    uint8_t checksum;
+} __packed__ SendNavStatus_s;
 
-/*-------------------- Receive --------------------*/
-enum {
-    ROBOT_CMD_CHASSIS_ENABLED = 1U << 0,
-    ROBOT_CMD_HEADING_VALID    = 1U << 1,
-    ROBOT_CMD_AIM_VALID        = 1U << 2,
-};
+typedef struct {
+    FrameHeader_t frame_header;
+    uint32_t sample_ticks;  // 主板 IMU 样本时间，100 us
+    float yaw;  // 主板 BMI088 惯性系，rad
+    uint8_t checksum;
+} __packed__ SendBigYawHeading_s;
 
-enum {
-    ROBOT_CMD_NAV_NORMAL = 0,
-    ROBOT_CMD_NAV_SLOW_SPIN = 1,
-    ROBOT_CMD_NAV_FAST_SPIN = 2,
-    ROBOT_CMD_NAV_FOLD = 3,
-    ROBOT_CMD_NAV_UPRIGHT = 4,
-};
+typedef struct {
+    FrameHeader_t frame_header;
+    uint8_t game_progress;
+    uint16_t stage_remain_time;
+    uint8_t checksum;
+} __packed__ SendCompStage_s;
 
-typedef struct RobotCmdData
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x01
-    uint32_t time_stamp;
-    struct
-    {
-        struct
-        {
-            float vx;
-            float vy;
-            float wz;
-        } __packed__ speed_vector;  // chassis_link，m/s、m/s、rad/s
-        struct
-        {
-            float roll;
-            float pitch;
-            float yaw;
-            float leg_lenth;
-        } __packed__ chassis;
-        struct
-        {
-            float pitch;
-            float yaw;
-        } __packed__ gimbal;
-        struct
-        {
-            uint8_t fire;
-            uint8_t fric_on;
-        } __packed__ shoot;
-        struct
-        {
-            uint8_t mode;    // ROBOT_CMD_NAV_*
-            uint8_t flags;   // ROBOT_CMD_* 有效位
-            uint32_t session;
-            float heading;   // 主控 BMI088 惯性参考系内的大 Yaw 绝对航向，rad
-        } __packed__ navigation;
-    } __packed__ data;
-    uint16_t checksum;
-} __packed__ ReceiveDataRobotCmd_s;
+typedef struct {
+    FrameHeader_t frame_header;
+    uint32_t event_data;
+    uint8_t checksum;
+} __packed__ SendCompEvent_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    uint16_t ally_1_robot_hp, ally_2_robot_hp, ally_3_robot_hp, ally_4_robot_hp;
+    uint16_t ally_outpost_hp, ally_base_hp, enemy_outpost_hp, enemy_base_hp;
+    uint8_t checksum;
+} __packed__ SendAlliedHealth_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    float hero_x, hero_y, engineer_x, engineer_y;
+    float standard_3_x, standard_3_y, standard_4_x, standard_4_y;  // m
+    uint8_t checksum;
+} __packed__ SendAlliedPos_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    uint8_t robot_id;
+    uint16_t current_hp, maximum_hp;
+    uint16_t projectile_allowance_17mm;
+    uint16_t remaining_gold_coin;
+    uint16_t projectile_allowance_fortress;
+    uint8_t checksum;
+} __packed__ SendRobotStatus_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    float self_x, self_y;  // m
+    uint8_t checksum;
+} __packed__ SendRobotPos_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    uint32_t rfid_status;
+    uint8_t rfid_status_2;
+    uint8_t checksum;
+} __packed__ SendRfidStatus_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    uint8_t armor_and_reason;  // 低 4 位为装甲 ID，高 4 位为扣血原因
+    uint8_t checksum;
+} __packed__ SendHealthReduction_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    uint32_t sentry_info;
+    uint16_t sentry_info_2;
+    uint64_t sentry_info_3;
+    uint8_t checksum;
+} __packed__ SendSentryInfo_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    float target_position_x, target_position_y;  // 裁判小地图坐标，m
+    uint8_t cmd_keyboard;
+    uint8_t target_robot_id;
+    uint8_t checksum;
+} __packed__ SendOperatorCmd_s;
+
+// 雷达站数据仅保留协议帧号和线长，当前暂不收发。
+typedef struct {
+    FrameHeader_t frame_header;
+    uint8_t payload[40];
+    uint8_t checksum;
+} __packed__ SendEnemyPos_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    uint8_t payload[10];
+    uint8_t checksum;
+} __packed__ SendEnemyHealth_s;
+
+typedef struct {
+    FrameHeader_t frame_header;
+    uint8_t payload[15];
+    uint8_t checksum;
+} __packed__ SendEnemyBuff_s;
 
 #ifdef __cplusplus
-static_assert(sizeof(ReceiveDataRobotCmd_s) == 58, "RobotCmd wire size");
-static_assert(sizeof(SendDataNavigationStatus_s) == 39, "navigation status wire size");
+static_assert(sizeof(FrameHeader_t) == 2, "USB header wire size");
+static_assert(sizeof(ReceiveSyncRequest_s) == 7, "SyncRequest wire size");
+static_assert(sizeof(ReceiveRoboCmd_s) == 22, "RoboCmd wire size");
+static_assert(sizeof(ReceiveShootCmd_s) == 12, "ShootCmd wire size");
+static_assert(sizeof(ReceiveRfrCmd_s) == 4, "RfrCmd wire size");
+static_assert(sizeof(ReceiveGlobalPath_s) == 64, "GlobalPath wire size");
+static_assert(sizeof(ReceiveDecisionGimbalCmd_s) == 11, "DecisionGimbalCmd wire size");
+static_assert(sizeof(SendSyncResponse_s) == 15, "SyncResponse wire size");
+static_assert(sizeof(SendRawGimbalImu_s) == 31, "RawGimbalIMU wire size");
+static_assert(sizeof(SendGimbalStatus_s) == 52, "GimbalStatus wire size");
+static_assert(sizeof(SendNavStatus_s) == 24, "NavStatus wire size");
+static_assert(sizeof(SendBigYawHeading_s) == 11, "BigYawHeading wire size");
+static_assert(sizeof(SendCompStage_s) == 6, "CompStage wire size");
+static_assert(sizeof(SendCompEvent_s) == 7, "CompEvent wire size");
+static_assert(sizeof(SendAlliedHealth_s) == 19, "AlliedHealth wire size");
+static_assert(sizeof(SendAlliedPos_s) == 35, "AlliedPos wire size");
+static_assert(sizeof(SendRobotStatus_s) == 14, "RobotStatus wire size");
+static_assert(sizeof(SendRobotPos_s) == 11, "RobotPos wire size");
+static_assert(sizeof(SendRfidStatus_s) == 8, "RfidStatus wire size");
+static_assert(sizeof(SendHealthReduction_s) == 4, "HealthReduction wire size");
+static_assert(sizeof(SendSentryInfo_s) == 17, "SentryInfo wire size");
+static_assert(sizeof(SendEnemyPos_s) == 43, "EnemyPos wire size");
+static_assert(sizeof(SendOperatorCmd_s) == 13, "OperatorCommand wire size");
+static_assert(sizeof(SendEnemyHealth_s) == 13, "EnemyHealth wire size");
+static_assert(sizeof(SendEnemyBuff_s) == 18, "EnemyBuff wire size");
 #endif
-
-// PID调参数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x02
-    uint32_t time_stamp;
-    struct
-    {
-        float kp;
-        float ki;
-        float kd;
-        float max_out;
-        float max_iout;
-    } __packed__ data;
-    uint16_t crc;
-} __packed__ ReceiveDataPidDebug_s;
-
-// 虚拟遥控器数据包
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x03
-    uint32_t time_stamp;
-    RcControl data;
-    uint16_t crc;
-} __packed__ ReceiveDataVirtualRc_s;
-
-typedef struct
-{
-    FrameHeader_t frame_header;  // 数据段id = 0x04
-    uint32_t time_stamp;
-    uint32_t sentry_cmd;
-    uint16_t crc;
-} __packed__ ReceiveDataSentryCmd_s;
-
 
 #endif  // USB_TYPEDEF_H

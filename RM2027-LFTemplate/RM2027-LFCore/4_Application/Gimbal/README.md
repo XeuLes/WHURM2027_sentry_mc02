@@ -87,27 +87,13 @@ DM 欧拉角和四元数接口保留，正常控制不请求。六轴解算 yaw 
 ## 板间通信与 USB
 
 完整帧布局、1000 Hz 调度、设备输出设置和超时规则见 [CAN3 v3 协议](../../../CAN3_PROTOCOL.md)。
-新导航命令/反馈、topic 映射及过洞握手见 [导航 USB 协议](../../../USB_NAVIGATION_PROTOCOL.md)。
+USB 帧格式、数据流向及过洞联锁见 [导航 USB 协议](../../../USB_NAVIGATION_PROTOCOL.md)。
 主控下发底盘系速度、大 Yaw 两种模式的目标/参考、裁判功率快照，各一帧；
 副板以一帧反馈实测底盘速度和大 Yaw 机械偏角。加上 DM 两类原始采样，共六帧每毫秒，最坏预算 81%。
 主控对直接遥控使用总偏角完成坐标转换，不再下发独立偏角帧。
-USB RobotMotion 保持 ID 0x08、10 ms 周期，上报底盘系实测速度和 CAN 接收时间，无效时停发。
-JointState 继续上报有效的小 Yaw、Pitch 关节角。默认 IOC/FDCAN 配置保持不变。
-
-USB RobotCmd 的 yaw/pitch 与 SENTRY_MAIN 一致，为**云台 IMU 坐标系下的绝对目标角（rad）**。
-板端直接写入 `RobotCmdState.gimbal_yaw/gimbal_pitch`。
-闭环用当前 IMU 姿态计算误差，yaw 取最短圆周差，pitch 按机械行程限幅。
-仅新的、长度/CRC 正确且发送时间戳前进的 RobotCmd 帧刷新本地指令时间；
-重复轮询旧缓存、其他 USB 包不会让旧瞄准目标保持有效。
-RobotCmd（ID `0x01`）固定 58 字节，复用原底盘速度、小云台目标和发射字段，
-通过 `data.navigation` 携带导航模式、有效位、会话和大 Yaw 航向。
-上位机重启后以新会话发送中性帧，收到回显后开始发送有效命令。
-使能的 mode 3/4 分别锁存折叠和回正请求。mode 0/1/2、失能与断流保留已请求形态。
-完整布局与握手见 [导航 USB 协议](../../../USB_NAVIGATION_PROTOCOL.md)。
-
-普通控制沿用 SENTRY 的目标变化判据。收到有效的 yaw/pitch 目标变化后进入自瞄。
-目标连续 `GIMBAL_AIM_LOST_MS` 未变化，或 RobotCmd 超过 `GIMBAL_AIM_TIMEOUT_MS`
-未更新时，经 GAP 转入扫描。
+USB `B2` 上报关节实测角和到位形态，`B3` 上报副板实测底盘速度与过洞执行状态。
+A1 的 mode 3/4 分别锁存折叠和回正请求。上位机根据 B4 实测航向完成坐标系换算，经 A1 提供自动过洞航向。主控检查航向和实测停车后开始折叠。
+A2 的 yaw/pitch 是电控世界系下的期望云台欧拉角，板端整体写入 `ShootCmdState`。200 ms 内有效时小云台进入 `kAutoAim`，超时或断链退回 GAP/扫描，大 Yaw 按 `kAutoAim`/`kFollow` 跟随。`shoot_mode` 交给发射任务：1/2 档先拉起摩擦轮，到速后再单发/连发。
 
 云台任务直接发送小云台的 GM6020 组帧和两台 DM 的独立 MIT 帧。
 初始化检查发送帧归属及同一 CAN 总线上 DM 的 ID 冲突。

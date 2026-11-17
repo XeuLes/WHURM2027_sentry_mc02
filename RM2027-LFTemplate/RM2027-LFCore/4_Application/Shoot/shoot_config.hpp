@@ -36,10 +36,15 @@ constexpr uint32_t kInitMs = 201U;
 constexpr uint32_t kControlMs = 1U;
 constexpr float kControlSeconds = kControlMs * 0.001f;
 constexpr uint32_t kAimLostMs = 3000U;
-constexpr uint32_t kRobotCmdTimeoutMs = 200U;
+constexpr uint32_t kShootCmdTimeoutMs = 200U; // A2 100 Hz，取十倍周期
 constexpr uint32_t kRefereeTimeoutMs = 300U;
 constexpr uint32_t kBlockTimeMs = 1000U;
 constexpr uint32_t kReverseTimeMs = 1250U;
+
+// 上位机 A2 的 shoot_mode 语义，对应 LFSentryCommon27 的 ShootingStatus。
+constexpr uint8_t kShootModeNone = 0U;
+constexpr uint8_t kShootModeSingle = 1U;
+constexpr uint8_t kShootModeBurst = 2U;
 
 // 速度均为机构正方向的 rad/s。摩擦轮物理转向由上面的电机方向配置。
 constexpr float kFricSpeedRadS[] = {1000.0f, 1000.0f, 1000.0f};

@@ -191,7 +191,9 @@ void update() {
           muzzle_info.linear_accel[0],
           muzzle_info.linear_accel[1],
           muzzle_info.accel_valid,
-          oldest_tick }
+          oldest_tick,
+          { muzzle_quaternion_info.quat[0], muzzle_quaternion_info.quat[1],
+            muzzle_quaternion_info.quat[2], muzzle_quaternion_info.quat[3] } }
     );
 }
 } // namespace muzzle_ins

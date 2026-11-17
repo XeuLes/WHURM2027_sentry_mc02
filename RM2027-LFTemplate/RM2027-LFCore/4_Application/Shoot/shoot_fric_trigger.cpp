@@ -55,8 +55,7 @@ struct ShootState {
     bool output_fault = false;
     bool stop_requested = true;
     bool automatic = false;
-    bool fire = false;
-    bool sentry_fric_cmd = false;
+    uint8_t shoot_mode = kShootModeNone;
     bool fric_at_speed = false;
     bool heat_fresh = false;
     bool move_flag = false;
@@ -169,17 +168,16 @@ void ShootObserver()
                                   SHOOT.fric_at_speed;
         }
     }
-    const bool command_fresh = !system.usb_link.offline &&
-        system.robot_cmd.last_update_ms != 0U &&
-        now - system.robot_cmd.last_update_ms < kRobotCmdTimeoutMs;
     SHOOT.automatic = !rc_online || SWITCH_IS_MID(sw);
-    SHOOT.fire = command_fresh && system.robot_cmd.fire != 0U;
-    SHOOT.sentry_fric_cmd = command_fresh && system.robot_cmd.fric_on != 0U;
 
-    // 故障只由明确停机指令清除；断联或云台异常不能自动解除锁定。
-    const bool host_stop = SHOOT.automatic && command_fresh &&
-        system.robot_cmd.fire == 0U && system.robot_cmd.fric_on == 0U;
-    if (SHOOT.stop_requested || host_stop) {
+    // 中档与断遥控时由上位机 A2 决定发射；失效或超时按不发弹处理。
+    const auto& shoot_cmd = system.shoot_cmd;
+    const bool shoot_cmd_fresh = !system.usb_link.offline && shoot_cmd.enabled &&
+        shoot_cmd.last_update_ms != 0U && now - shoot_cmd.last_update_ms < kShootCmdTimeoutMs;
+    SHOOT.shoot_mode = shoot_cmd_fresh ? shoot_cmd.shoot_mode : kShootModeNone;
+
+    // 只有遥控器明确请求停机才清除输出故障。
+    if (SHOOT.stop_requested) {
         SHOOT.output_fault = false;
     }
 
@@ -223,21 +221,25 @@ void ShootSetMode()
         return;
     }
 
-    if (SHOOT.automatic) {
-        if (SHOOT.sentry_fric_cmd) {
-            SHOOT.state = SHOOT.fric_at_speed ? FRIC_READY : FRIC_ON;
-        }
-        if (SHOOT.fire && SHOOT.state == FRIC_READY) {
-            SHOOT.mode = LOAD_BURSTFIRE;
-        }
-    } else {
+    if (!SHOOT.automatic) {
         // 上档清弹。沿用 SENTRY 的最低轮速门槛，允许清弹时不等待精确到速。
         SHOOT.state = FRIC_READY;
         SHOOT.mode = LOAD_BURSTFIRE;
+        if (!SHOOT.fric_at_speed || !SHOOT.heat_fresh) {
+            SHOOT.mode = LOAD_STOP;
+        }
+        return;
     }
-    if (!SHOOT.fric_at_speed || !SHOOT.heat_fresh) {
-        SHOOT.mode = LOAD_STOP;
+
+    // 中档与断遥控交给上位机 A2：1/2 档先拉起摩擦轮，到速后再按档位发弹。
+    if (SHOOT.shoot_mode == kShootModeNone) {
+        return;
     }
+    SHOOT.state = SHOOT.fric_at_speed ? FRIC_READY : FRIC_ON;
+    if (SHOOT.state != FRIC_READY || !SHOOT.heat_fresh) {
+        return;
+    }
+    SHOOT.mode = SHOOT.shoot_mode == kShootModeSingle ? LOAD_BULLET : LOAD_BURSTFIRE;
 }
 
 float FireControl()
